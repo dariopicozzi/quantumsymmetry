@@ -1,1 +1,1 @@
-from quantumsymmetry import quantumsymmetry
+from quantumsymmetry import core
