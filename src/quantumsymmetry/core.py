@@ -227,24 +227,7 @@ def find_symmetry_generators(mol, mf, irrep):
     
     n_alpha_sign = (-1)**number_up
     n_beta_sign = (-1)**number_down
-    
-    #irrep optional argument
-    if irrep == None:
-        irrep = irrep_labels[0]
-    else:
-        irreps_subset = set(target_irrep_labels)
-        irreps_subset.add(irrep_labels[0])
-        while len(irreps_subset) < 2**(len(symmetry_generator_labels)- 2):
-            for pair in combinations(irreps_subset, 2):
-                product = list(np.array(character_table[irrep_labels.index(pair[0])]) * np.array(character_table[irrep_labels.index(pair[1])]))
-                irreps_subset.add(irrep_labels[character_table.index(product)])
-        if irrep not in irreps_subset:
-            exception = "The irrep optional argument can only be one of "
-            for x in irreps_subset:
-                exception += str(x) + ', '
-            exception = exception[:-2] + '.'
-            raise Exception(exception)
-    
+        
     #calculates and stores the signs for each generator (the eigensectors of interest)
     signs = [n_alpha_sign, n_beta_sign]
     for generator in symmetry_generator_labels:
@@ -626,16 +609,16 @@ def get_molecule_name(mol):
     atomlist = list()
     for x in mol._atom:
         atomlist.append(x[0])
+    atomlist.sort()
     for i in range(len(atomlist)):
         if atomlist[i] == 'H':
             atomlist.insert(0, atomlist.pop(i))
     for i in range(len(atomlist)):
         if atomlist[i] == 'C':
             atomlist.insert(0, atomlist.pop(i))
-    atomlist.sort()
     for x in atomlist:
         if x not in atoms:
-            atoms.append(x[0])
+            atoms.append(x)
             numbers.append(1)
         else:
             numbers[atoms.index(x[0])] += 1
@@ -692,6 +675,27 @@ def QubitOperator_to_PauliSumOp(qubitoperator):
         output += qubitoperator.terms[key]*quantum_info.SparsePauliOp(string)
     return opflow.PauliSumOp(output).reduce()
 
+def find_ground_state_irrep(orbital_labels, mo_occ, character_table, irrep_labels):
+    """Finds the ground state irrep
+
+    Args:
+        orbital_labels (1D array): molecular orbital labels by irrep
+        mo_occ (1D array): molecular occupancies (an array containing 0s, 1s and 2s)
+        character_table (2D array): point group character table
+        irrep_labels (1D array): the irrep labels as row labels for the character table
+
+    Returns:
+        str: the ground state irrep
+    """
+    irrep_row = np.full(len(character_table), 1)
+    for i in range(len(orbital_labels)):
+        if mo_occ[i] == 1:
+            irrep_row *= character_table[irrep_labels.index(orbital_labels[i])]
+    for i in range(len(character_table)):
+        if sum(character_table[i]*irrep_row) == len(character_table):
+            irrep = irrep_labels[i]
+    return irrep
+
 def reduced_hamiltonian(atom, basis, charge = 0, spin = 0, irrep = None, verbose = True, show_lowest_eigenvalue = False, output_format = 'openfermion'):
     """Calculates the qubit representation of the second-quantized molecular Hamiltonian in an encoding that reduces its qubit count by using the point-group and parity of number of electron symmetries.
 
@@ -700,7 +704,7 @@ def reduced_hamiltonian(atom, basis, charge = 0, spin = 0, irrep = None, verbose
         basis (str): molecular chemistry basis (for example the minimal basis is 'sto-3g').
         charge (int, optional): total charge of the molecule. Defaults to 0.
         spin (int, optional): number of unpaired electrons 2S (the difference between the number of alpha and beta electrons). Defaults to 0.
-        irrep (str, optional): irreducible representation of interest. Defaults to the totally symmetric irreducible representation.
+        irrep (str, optional): irreducible representation of interest. Defaults to the irreducible representation of the molecular ground state (as long as charge and spin have been set correctly).
         verbose (bool, optional): print level (if True prints a summary of the qubit reduction procedure in HTML format, if False does not print any input). Defaults to True.
         show_lowest_eigenvalue (bool, optional): if True shows lowest eigenvalues of the molecular Hamiltonians (when verbose is set to True). Defaults to False.
         output_format (str, optional): output format of qubit-reduced Hamiltonian, can be set to either 'openfermion' (returns an openfermion.QubitOperator object) or 'qiskit' (returns a qiskit.opflow.PauliSumOp object). Defaults to 'openfermion'.
@@ -716,13 +720,18 @@ def reduced_hamiltonian(atom, basis, charge = 0, spin = 0, irrep = None, verbose
     mol.spin = spin
     mol.verbose = 0
     mol.build()
-    if mol.groupname == 'Dooh' or mol.groupname == 'Coov' or mol.groupname == 'SO3':
+    if mol.groupname == 'Dooh' or mol.groupname == 'SO3':
         mol.symmetry = 'D2h'
+        mol.build()
+    if mol.groupname == 'Coov':
+        mol.symmetry = 'C2v'
         mol.build()
     mf = scf.RHF(mol)
     mf.kernel()
     label_orb_symm = symm.label_orb_symm(mol, mol.irrep_name, mol.symm_orb, mf.mo_coeff)
     character_table, conj_labels, irrep_labels, conj_descriptions = get_character_table(mol.groupname)
+    if irrep == None:
+        irrep =  find_ground_state_irrep(label_orb_symm, mf.mo_occ, character_table, irrep_labels)
     molecule_name = get_molecule_name(mol)
     symmetry_generator_labels, symmetry_generators_strings, target_qubits, symmetry_generators, signs, descriptions = find_symmetry_generators(mol, mf, irrep)
     tableau, tableau_signs = make_clifford_tableau(symmetry_generators, signs, target_qubits)
