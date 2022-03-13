@@ -692,13 +692,14 @@ def QubitOperator_to_PauliSumOp(qubitoperator):
         output += qubitoperator.terms[key]*quantum_info.SparsePauliOp(string)
     return opflow.PauliSumOp(output).reduce()
 
-def reduced_hamiltonian(atom, basis, charge = 0, irrep = None, verbose = True, show_lowest_eigenvalue = False, output_format = 'openfermion'):
+def reduced_hamiltonian(atom, basis, charge = 0, spin = 0, irrep = None, verbose = True, show_lowest_eigenvalue = False, output_format = 'openfermion'):
     """Calculates the qubit representation of the second-quantized molecular Hamiltonian in an encoding that reduces its qubit count by using the point-group and parity of number of electron symmetries.
 
     Args:
         atom (str): molecular geometry (for example the hydrogen molecule in the optimized configuration is 'H 0 0 0; H 0.7414 0 0').
         basis (str): molecular chemistry basis (for example the minimal basis is 'sto-3g').
         charge (int, optional): total charge of the molecule. Defaults to 0.
+        spin (int, optional): number of unpaired electrons 2S (the difference between the number of alpha and beta electrons). Defaults to 0.
         irrep (str, optional): irreducible representation of interest. Defaults to the totally symmetric irreducible representation.
         verbose (bool, optional): print level (if True prints a summary of the qubit reduction procedure in HTML format, if False does not print any input). Defaults to True.
         show_lowest_eigenvalue (bool, optional): if True shows lowest eigenvalues of the molecular Hamiltonians (when verbose is set to True). Defaults to False.
@@ -712,6 +713,7 @@ def reduced_hamiltonian(atom, basis, charge = 0, irrep = None, verbose = True, s
     mol.symmetry = True
     mol.basis = basis
     mol.charge = charge
+    mol.spin = spin
     mol.verbose = 0
     mol.build()
     if mol.groupname == 'Dooh' or mol.groupname == 'Coov' or mol.groupname == 'SO3':
