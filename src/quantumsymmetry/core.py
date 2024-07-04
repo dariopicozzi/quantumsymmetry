@@ -1091,7 +1091,7 @@ def make_encoding(atom, basis, charge = 0, spin = 0, irrep = None, CAS = None, n
         return encoding, CAS_encoding
     else:
         encoding = (tableau, tableau_signs, target_qubits)    
-        return encoding, CAS_encoding
+        return encoding
 
 def apply_encoding(operator, encoding, output_format = 'openfermion'):
     """Applies the encoding to a fermionic operator object or a qubit operator (in the Jordan Wigner basis) object
