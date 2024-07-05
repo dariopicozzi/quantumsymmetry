@@ -1,2 +1,2 @@
 from .core import reduced_hamiltonian, make_encoding, apply_encoding
-from .qiskit_converter import SymmetryAdaptedEncodingQubitConverter, HartreeFockCircuit, make_excitation_ops
+from .qiskit_converter import UCC_SAE_circuit, SymmetryAdaptedEncodingQubitConverter, HartreeFockCircuit, make_excitation_ops

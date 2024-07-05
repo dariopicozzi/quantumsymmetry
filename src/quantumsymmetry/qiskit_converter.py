@@ -1,12 +1,11 @@
 from quantumsymmetry.core import *
-from openfermion import QubitOperator, FermionOperator, jordan_wigner, utils, linalg
-from qiskit import opflow, quantum_info
 from qiskit_nature.operators.second_quantization import FermionicOp
 from qiskit_nature.converters.second_quantization import QubitConverter
 from qiskit.circuit.quantumcircuit import QuantumCircuit
-from pyscf import gto, scf, symm, ao2mo
+from pyscf import gto, scf
 from itertools import combinations
 from qiskit_nature.operators.second_quantization import FermionicOp
+from qiskit_nature.circuit.library import UCC
 
 def apply_encoding_mapper(operator, suppress_none=True):
     apply_encoding(operator = operator, encoding = SymmetryAdaptedEncoding_encoding, output_format = 'qiskit')
@@ -92,7 +91,7 @@ def HartreeFockCircuit(encoding, atom, basis, charge = 0, spin = 0, irrep = None
     if len(encoding) == 2:
         encoding, CAS_encoding = encoding
     else:
-        CAS_encoding == None
+        CAS_encoding = None
     
     tableau, tableau_signs, target_qubits = encoding
     tableau = np.array(tableau)
@@ -195,3 +194,35 @@ def make_excitation_ops(reference_state, encoding):
         op = apply_encoding(encoding = encoding, operator = excitation, output_format = 'qiskit')
         operators.append(op)
     return operators
+
+def get_num_particles_spin_orbitals(atom, basis, charge = 0, spin = 0):
+    mol = gto.Mole()
+    mol.atom = atom
+    mol.symmetry = True
+    mol.basis = basis
+    mol.charge = charge
+    mol.spin = spin
+    mol.verbose = 0
+    mol.build()
+    mf = scf.RHF(mol)
+    mf.kernel()
+    number_up = (mol.nelectron + mol.spin)//2
+    number_down = (mol.nelectron - mol.spin)//2
+    num_particles = (number_up, number_down)
+    num_spin_orbitals = len(mf.mo_coeff)*2
+    
+    return num_particles, num_spin_orbitals
+
+def UCC_SAE_circuit(atom, basis, charge = 0, spin = 0, irrep = None, CAS = None, natural_orbitals = False, excitations = "sd"):
+    encoding = make_encoding(atom = atom, basis = basis, charge = charge, spin = spin, CAS = CAS, irrep = irrep, natural_orbitals = natural_orbitals)
+    num_particles, num_spin_orbitals = get_num_particles_spin_orbitals(atom = atom, basis = basis, charge = charge, spin = spin)    
+    initial_state = HartreeFockCircuit(encoding = encoding, atom = atom, basis = basis, charge = charge, spin = spin, CAS = CAS, irrep = irrep, natural_orbitals = natural_orbitals)
+    qubit_converter = SymmetryAdaptedEncodingQubitConverter(encoding)    
+    ansatz = UCC(
+        excitations = excitations,
+        num_particles = num_particles,
+        initial_state = initial_state,
+        num_spin_orbitals = num_spin_orbitals,
+        qubit_converter = qubit_converter,
+    )
+    return ansatz
