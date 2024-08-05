@@ -1,12 +1,14 @@
-from ..quantumsymmetry import reduced_hamiltonian
+from ..quantumsymmetry import Encoding
 from numpy.linalg import eigvalsh
 from numpy import isclose
 from pyscf import gto, scf, fci, mcscf
 
-def compare_energies(atom, basis, charge = 0, spin = 0, CAS = None):
+def compare_energies(atom, basis, charge = 0, spin = 0, CAS = None, active_mo = None):
     #Finds lowest eigenvalue of symmetry-adapted qubit Hamiltonian
-    H = reduced_hamiltonian(atom = atom, basis = basis, charge = charge, spin = spin, verbose = False, CAS = CAS, output_format = 'qiskit')
+    encoding = Encoding(atom = atom, basis = basis, charge = charge, spin = spin, verbose = False, CAS = CAS, output_format = 'qiskit', active_mo = active_mo)
+    H = encoding.hamiltonian
     H = H.to_matrix()
+    print(type(H))
     lowest_eigenvalue = eigvalsh(H)[0]
 
     #Calculates full configuration interaction/CASCI ground state energy from PySCF
@@ -17,9 +19,13 @@ def compare_energies(atom, basis, charge = 0, spin = 0, CAS = None):
         ci = fci.FCI(mf).run(verbose = 0)
         ground_state_energy = ci.e_tot
     else:
-        cas = mcscf.CASCI(mf, *CAS).run(verbose = 0)
+        cas = mcscf.CASCI(mf, *CAS)
+        if active_mo == None:
+            cas.run(verbose = 0)
+        else:
+            mo = cas.sort_mo(active_mo)
+            cas.kernel(mo)
         ground_state_energy = cas.e_tot
-
     print(lowest_eigenvalue, ground_state_energy)
     return isclose(lowest_eigenvalue, ground_state_energy)
 
@@ -53,6 +59,14 @@ def test_H2O_CAS():
     assert compare_energies(
     atom = 'O 0 0 0.1197; H 0 0.7616 -0.4786; H 0 -0.7616 -0.4786',
     basis = 'sto-3g',
+    CAS = (4, 4))
+
+#Water molecule (H2O) with STO-3G basis and CAS(4, 4) and active molecular orbital selection
+def test_H2O_CAS_active_mo():
+    assert compare_energies(
+    atom = 'O 0 0 0.1197; H 0 0.7616 -0.4786; H 0 -0.7616 -0.4786',
+    basis = 'sto-3g',
+    active_mo = [3,4,6,7],
     CAS = (4, 4))
 
 #Oxygen molecule (O2) with STO-3G basis and CAS(4, 4)

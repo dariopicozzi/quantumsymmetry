@@ -1,4 +1,4 @@
-from ..quantumsymmetry import reduced_hamiltonian, UCC_SAE_circuit
+from ..quantumsymmetry import Encoding
 from ..quantumsymmetry.qiskit_converter import get_num_particles_spin_orbitals
 from qiskit import BasicAer, Aer
 from qiskit.utils import QuantumInstance
@@ -56,8 +56,12 @@ def UCC_JW_VQE(atom, basis, charge = 0, spin = 0):
     return energy1
     
 def UCC_SAE_VQE(atom, basis, charge = 0, spin = 0, CAS = None):
-    qubit_operator = reduced_hamiltonian(atom = atom, basis = basis, charge = charge, spin = spin, CAS = CAS, output_format = 'qiskit', verbose = False)
-    ansatz = UCC_SAE_circuit(atom = atom, basis = basis, charge = charge, spin = spin, CAS = CAS)
+    encoding = Encoding(atom = atom, basis = basis, charge = charge, spin = spin, verbose = False, CAS = CAS, output_format = 'qiskit')
+    qubit_operator = encoding.hamiltonian
+    ansatz = encoding.UCC_circuit
+    
+    #qubit_operator = reduced_hamiltonian(atom = atom, basis = basis, charge = charge, spin = spin, CAS = CAS, output_format = 'qiskit', verbose = False)
+    #ansatz = UCC_SAE_circuit(atom = atom, basis = basis, charge = charge, spin = spin, CAS = CAS)
 
     backend = BasicAer.get_backend('statevector_simulator')
     quantum_instance=QuantumInstance(backend=backend)
@@ -105,7 +109,7 @@ def test_UCC_circuit_H3():
     assert isclose(energy1, energy2 - energy_nuc)
 
 def test_UCC_circuit_H2O_CAS():
-    #Parameters for H3+ in the sto-3g basis
+    #Parameters for H2O in the sto-3g basis with CAS(4, 4)
     atom = 'O 0 0 0.1197; H 0 0.7616 -0.4786; H 0 -0.7616 -0.4786'
     basis = 'sto3g'
     CAS = (4, 4)

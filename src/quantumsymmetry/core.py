@@ -956,10 +956,10 @@ def qubit_table(tableau, tableau_signs, target_qubits, orbital_names, CAS_qubits
     M_XX = (1 - np.array(tableau)[:n, :n])//2
 
     #take care of frozen core occupancies
-    for i in range(n):
-        for j in range(n):
-            if M_XX[i][j] and j in frozen_core_qubits:
-                signs[i] *= -1
+    #for i in range(n):
+    #    for j in range(n):
+    #        if M_XX[i][j] and j in frozen_core_qubits:
+    #            signs[i] *= -1
 
     #delete the M_XX matrix columns that correspond to target qubits, frozen-core and virtual qubits (to enforce correct numbering after tapering)
     for x in redundant_qubits[::-1]:

@@ -64,6 +64,21 @@ def SymmetryAdaptedEncodingQubitConverter(encoding):
     return qubit_transformation
 
 def HartreeFockCircuit(encoding, atom, basis, charge = 0, spin = 0, irrep = None, CAS = None, natural_orbitals = False):
+    """Circuit to prepare the Hartree-Fock state. The circuit is a number of Pauli X gates.
+
+    Args:
+        encoding (_type_):
+        atom (_type_): _description_
+        basis (_type_): _description_
+        charge (int, optional): _description_. Defaults to 0.
+        spin (int, optional): _description_. Defaults to 0.
+        irrep (_type_, optional): _description_. Defaults to None.
+        CAS (_type_, optional): _description_. Defaults to None.
+        natural_orbitals (bool, optional): _description_. Defaults to False.
+
+    Returns:
+        _type_: _description_
+    """
     mol = gto.Mole()
     mol.atom = atom
     mol.symmetry = True
