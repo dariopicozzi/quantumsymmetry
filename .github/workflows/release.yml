@@ -1,0 +1,46 @@
+name: Release to PyPI
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # This triggers the workflow on version tags (e.g., v1.0.0)
+
+permissions:
+  contents: read
+  id-token: write  # Required for OIDC authentication
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.8'  # Specify the Python version you want to use
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+
+      - name: Install dependencies
+        run: poetry install --no-root
+
+      - name: Install testing dependencies
+        run: poetry add pytest  # Add pytest or any other testing framework you use
+
+      - name: Run tests
+        run: poetry run pytest
+
+      - name: Build the package
+        if: success()  # Only run if previous steps succeeded
+        run: poetry build
+
+      - name: Publish to PyPI
+        if: success()  # Only run if previous steps succeeded
+        env:
+          POETRY_PYPI_TOKEN_PYPI: ${{ secrets.GITHUB_TOKEN }}
+        run: poetry publish --build
