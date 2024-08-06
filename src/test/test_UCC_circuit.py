@@ -60,7 +60,7 @@ def test_UCC_circuit_H3():
     charge = 1
     spin = 0
     basis = 'sto3g'
-
+    
     energy_JW = UCC_VQE(atom = atom, basis = basis, charge = charge, encoding_type = 'JW')
     energy_SAE = UCC_VQE(atom = atom, basis = basis, charge = charge, encoding_type = 'SAE')
     

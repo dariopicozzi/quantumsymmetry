@@ -109,15 +109,14 @@ class Encoding():
             CAS_tableau_signs = [1]*2*self.nspinorbital
             for x in self.frozen_core_orbitals:
                 CAS_tableau_signs[x] = -1
-            e = self.tableau
-            e = (1 - np.matrix(e))//2
+            e = np.array(self.tableau)
+            e = (1 - e) // 2
             e = np.linalg.inv(e)
             s = np.matmul(e, (1 -np.array(CAS_tableau_signs))//2) % 2
             s += (1-self.tableau_signs)//2
             s = s%2
             s = -2*s + 1
-            s = s.tolist()[0]
-            self.tableau_signs = s
+            self.tableau_signs = (s).astype(int).tolist()
         
     def apply(self, operator):
         if type(operator) == dict:
@@ -243,13 +242,11 @@ class Encoding():
         ZZ_block = (-tableau[:n, :n] + 1)//2
         sign_vector = (-tableau_signs[:n]+ 1)//2
         string_b = f'{b:0{n}b}'
-        print(string_b)
         b_list = list(string_b)[::-1]
         for i in range(len(b_list)):
             b_list[i] = int(b_list[i])
         c_list = np.matmul(ZZ_block, b_list + sign_vector)[::-1] % 2
         string_c = ''.join(str(int(x)) for x in c_list)
-        print(string_c)
         
         #Remove target qubits
         target_qubits = self.target_qubits

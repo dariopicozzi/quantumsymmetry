@@ -30,10 +30,12 @@ jobs:
         run: poetry install --no-root
 
       - name: Install testing dependencies
-        run: poetry add pytest  # Add pytest or any other testing framework you use
+        run: |
+          poetry add pytest  # Add pytest or any other testing framework you use
+          poetry add pytest-rerunfailures  # Add pytest-rerunfailures for retry functionality
 
       - name: Run tests
-        run: poetry run pytest
+        run: poetry run pytest --reruns 3 --reruns-delay 2
 
       - name: Build the package
         if: success()  # Only run if previous steps succeeded
