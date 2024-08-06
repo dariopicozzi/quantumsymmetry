@@ -1,11 +1,10 @@
-from quantumsymmetry.core import *
-from qiskit_nature.operators.second_quantization import FermionicOp
-from qiskit_nature.converters.second_quantization import QubitConverter
+from .core import *
+from qiskit_nature.second_q.operators import FermionicOp
+from qiskit_nature.second_q.mappers import QubitMapper
 from qiskit.circuit.quantumcircuit import QuantumCircuit
 from pyscf import gto, scf
 from itertools import combinations
-from qiskit_nature.operators.second_quantization import FermionicOp
-from qiskit_nature.circuit.library import UCC
+from qiskit_nature.second_q.circuit.library.ansatzes import UCC
 
 def apply_encoding_mapper(operator, suppress_none=True):
     apply_encoding(operator = operator, encoding = SymmetryAdaptedEncoding_encoding, output_format = 'qiskit')
@@ -57,10 +56,8 @@ def fix_qubit_order_convention(input):
 def SymmetryAdaptedEncodingQubitConverter(encoding):
     global SymmetryAdaptedEncoding_encoding
     SymmetryAdaptedEncoding_encoding = encoding
-    qubit_transformation = QubitConverter(apply_encoding_mapper)
-    qubit_transformation.convert_match = convert_encoding
-    qubit_transformation.mapper.map = apply_encoding_mapper
-    qubit_transformation.convert = convert_encoding
+    qubit_transformation = QubitMapper()
+    qubit_transformation.map = apply_encoding_mapper
     return qubit_transformation
 
 def HartreeFockCircuit(encoding, atom, basis, charge = 0, spin = 0, irrep = None, CAS = None, natural_orbitals = False):
@@ -131,7 +128,7 @@ def HartreeFockCircuit(encoding, atom, basis, charge = 0, spin = 0, irrep = None
         for qubit in CAS_target_qubits:
             l = len(string_c)
             string_c = string_c[:l - qubit - 1] + string_c[l - qubit:]
-
+    
     output = QuantumCircuit(len(string_c))
     for i, bit in enumerate(string_c[::-1]):
         if bit == '1':

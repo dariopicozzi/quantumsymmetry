@@ -2,10 +2,9 @@ import numpy as np
 from itertools import combinations
 from pyscf import gto, scf, symm, ao2mo, mp, mcscf
 from openfermion import QubitOperator, FermionOperator, jordan_wigner, utils, linalg
-from qiskit import opflow, quantum_info
-from qiskit_nature.operators.second_quantization import FermionicOp
-from qiskit_nature.converters.second_quantization import QubitConverter
-from qiskit_nature.mappers.second_quantization import JordanWignerMapper
+from qiskit import quantum_info
+from qiskit_nature.second_q.operators import FermionicOp
+from qiskit_nature.second_q.mappers import JordanWignerMapper
 from IPython.display import display, HTML
 from tabulate import tabulate
 
@@ -799,13 +798,13 @@ def get_molecule_name(mol):
     return string
 
 def QubitOperator_to_PauliSumOp(qubitoperator, num_qubits = None):
-    """Converts a qubit operator stored as in an OpenFermion format (an openfermion.QubitOperator object) into the equivalent operator in Qiskit format (a qiskit.opflow.PauliSumOp object)
+    """Converts a qubit operator stored as in an OpenFermion format (an openfermion.QubitOperator object) into the equivalent operator in Qiskit format (a qiskit.quantum_info.SparsePauliOp object)
 
     Args:
         qubitoperator (openfermion.QubitOperator): the openfermion.QubitOperator input 
 
     Returns:
-        opflow.PauliSumOp: the qiskit.opflow.PauliSumOp output
+        quantum_info.SparsePauliOp: the qiskit.quantum_info.SparsePauliOp output
     """
     if num_qubits == None:
         N = utils.count_qubits(qubitoperator)
@@ -831,7 +830,7 @@ def QubitOperator_to_PauliSumOp(qubitoperator, num_qubits = None):
                     else:
                         string += 'I'
         output += qubitoperator.terms[key]*quantum_info.SparsePauliOp(string[::-1])
-    return opflow.PauliSumOp(output).reduce()
+    return quantum_info.SparsePauliOp(output).chop()
 
 def PauliSumOp_to_QubitOperator(input):
     output = QubitOperator()
@@ -846,6 +845,19 @@ def PauliSumOp_to_QubitOperator(input):
                 term += s + str(N - i - 1) + ' '
         output += coeff*QubitOperator(term)
     return output
+
+def SparsePauliOp_to_QubitOperator(input_operator):
+    output_operator = QubitOperator()
+    for i in range(input_operator.size):
+        coeff = input_operator.coeffs[i]
+        pauli = input_operator.paulis[i].to_label()[::-1]
+        pauli2 = str()
+        for j in range(len(pauli)):
+            p = pauli[j]
+            if p == 'X' or p == 'Y' or p == 'Z':
+                pauli2 += p + str(j) + ' '
+        output_operator += coeff*QubitOperator(pauli2)
+    return output_operator
 
 def binary_row_echelon(A):
     """ Return Row Echelon Form of matrix A """
@@ -1106,9 +1118,9 @@ def apply_encoding(operator, encoding, output_format = 'openfermion'):
     if type(operator) == FermionOperator:
         operator = jordan_wigner(operator)
     if type(operator) == FermionicOp:
-        operator = QubitConverter(JordanWignerMapper()).convert(operator)
-    if type(operator) == opflow.PauliSumOp:
-        operator = PauliSumOp_to_QubitOperator(operator)
+        operator = JordanWignerMapper().map(operator)
+    if type(operator) == quantum_info.SparsePauliOp:
+        operator = SparsePauliOp_to_QubitOperator(operator)
     if len(encoding) == 3:
         tableau, tableau_signs, target_qubits = encoding
         CAS_target_qubits = []
@@ -1137,10 +1149,10 @@ def reduced_hamiltonian(atom, basis, charge = 0, spin = 0, irrep = None, verbose
         irrep (str, optional): irreducible representation of interest. Defaults to the irreducible representation of the molecular ground state (as long as charge and spin have been set correctly).
         verbose (bool, optional): print level (if True prints a summary of the qubit reduction procedure in HTML format, if False does not print any input). Defaults to True.
         show_lowest_eigenvalue (bool, optional): if True shows lowest eigenvalues of the molecular Hamiltonians (when verbose is set to True). Defaults to False.
-        output_format (str, optional): output format of qubit-reduced Hamiltonian, can be set to either 'openfermion' (returns an openfermion.QubitOperator object) or 'qiskit' (returns a qiskit.opflow.PauliSumOp object). Defaults to 'openfermion'.
+        output_format (str, optional): output format of qubit-reduced Hamiltonian, can be set to either 'openfermion' (returns an openfermion.QubitOperator object) or 'qiskit' (returns a qiskit.quantum_info.SparsePauliOp object). Defaults to 'openfermion'.
 
     Returns:
-        openfermion.QubitOperator or qiskit.opflow.PauliSumOp: hamiltonian in the qubit reduced encoding as an openfermion.QubitOperator object (qiskit.opflow.PauliSumOp object if output format is set to 'qiskit')
+        openfermion.QubitOperator or qiskit.quantum_info.SparsePauliOp: hamiltonian in the qubit reduced encoding as an openfermion.QubitOperator object (qiskit.quantum_info.SparsePauliOp object if output format is set to 'qiskit')
     """
 
     mol = gto.Mole()

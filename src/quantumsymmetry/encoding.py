@@ -1,15 +1,15 @@
 from pyscf import gto, scf, mp, mcscf, symm
-from quantumsymmetry.core import * 
-from quantumsymmetry.qiskit_converter import UCC_SAE_circuit
+from .core import * 
+from .qiskit_converter import UCC_SAE_circuit
+from qiskit.circuit.quantumcircuit import QuantumCircuit
 import numpy as np
 from numpy import linalg
 from tabulate import tabulate
 from IPython.display import display, HTML
 from openfermion import QubitOperator, FermionOperator, jordan_wigner, utils, linalg
-from qiskit import opflow, quantum_info
-from qiskit_nature.operators.second_quantization import FermionicOp
-from qiskit_nature.converters.second_quantization import QubitConverter
-from qiskit_nature.mappers.second_quantization import JordanWignerMapper
+from qiskit import quantum_info
+from qiskit_nature.second_q.operators import FermionicOp
+from qiskit_nature.second_q.mappers import QubitMapper, JordanWignerMapper, InterleavedQubitMapper
 
 class Encoding():
     def __init__(self, atom, basis, charge = 0, spin = 0, irrep = None, verbose = False, show_lowest_eigenvalue = False, CAS = None, natural_orbitals = False, active_mo = None, output_format = 'openfermion'):
@@ -99,7 +99,6 @@ class Encoding():
             self.CAS_qubits = [self.frozen_core_orbitals, self.active_space_orbitals, self.virtual_orbitals]
         else:
             self.CAS_qubits = None
-        print(self.CAS_qubits)
     
     def get_CAS_encoding(self):
         if self.CAS != None:
@@ -121,19 +120,30 @@ class Encoding():
             self.tableau_signs = s
         
     def apply(self, operator):
+        if type(operator) == dict:
+            for key in operator:
+                operator.update({key: self.apply(operator[key])})
+            return operator
+        if type(operator) == list:
+            for i in range(len(operator)):
+                operator[i] = self.apply(operator[i])
+            return operator
         if type(operator) == FermionOperator:
             operator = jordan_wigner(operator)
         if type(operator) == FermionicOp:
-            operator = QubitConverter(JordanWignerMapper()).convert(operator)
-        if type(operator) == opflow.PauliSumOp:
-            operator = PauliSumOp_to_QubitOperator(operator)
-        operator = apply_Clifford_tableau(operator, self.tableau, self.tableau_signs)
-        operator = simplify_QubitOperator(project_operator(operator, self.target_qubits))
-        if self.output_format == 'openfermion':
+            operator = InterleavedQubitMapper(JordanWignerMapper()).map(operator)
+        if type(operator) == quantum_info.SparsePauliOp:
+            operator = SparsePauliOp_to_QubitOperator(operator)
+        if type(operator) == QubitOperator:
+            operator = apply_Clifford_tableau(operator, self.tableau, self.tableau_signs)
+            operator = simplify_QubitOperator(project_operator(operator, self.target_qubits))
+            if self.output_format == 'openfermion':
+                return operator
+            elif self.output_format == 'qiskit':
+                operator = QubitOperator_to_PauliSumOp(operator, num_qubits= self.nspinorbital - len(self.target_qubits))
             return operator
-        elif self.output_format == 'qiskit':
-            operator = QubitOperator_to_PauliSumOp(operator, num_qubits= self.nspinorbital - len(self.target_qubits))
-        return operator
+        else:
+            raise TypeError("Unsupported input type")
     
     def hamiltonian(self):
         self.jordan_wigner_hamiltonian, self.fermion_hamiltonian = get_hamiltonian(self.mol, self.mf)
@@ -217,12 +227,48 @@ class Encoding():
             to_print += '<p>Its lowest eigenvalue is ' + f'{ground_state3[0]:.15f}' + ' Ha.</p>'
         display(HTML(to_print))
 
-    def UCC_circuit(self, excitations = "sd"):
-        circuit = UCC_SAE_circuit(atom = self.atom, basis = self.basis, charge = self.charge, spin = self.spin, irrep = self.irrep, CAS = self.CAS, natural_orbitals = self.natural_orbitals, excitations = excitations)
-        return circuit
+    def qiskit_mapper(self):
+        mapper = QubitMapper()
+        mapper.map = self.apply
+        return mapper
     
+    def HF_circuit(self):
+        #Compute Jordan-Wigner Hartree-Fock ket as an int (e.g. 3 for 0011)
+        b = HartreeFock_ket(self.mo_occ)
+
+        #Recover ZZ-block of Cliffort tableau and implement v' = C_ZZ v + s mod2
+        tableau = np.array(self.tableau)
+        tableau_signs = np.array(self.tableau_signs)
+        n = self.nspinorbital
+        ZZ_block = (-tableau[:n, :n] + 1)//2
+        sign_vector = (-tableau_signs[:n]+ 1)//2
+        string_b = f'{b:0{n}b}'
+        print(string_b)
+        b_list = list(string_b)[::-1]
+        for i in range(len(b_list)):
+            b_list[i] = int(b_list[i])
+        c_list = np.matmul(ZZ_block, b_list + sign_vector)[::-1] % 2
+        string_c = ''.join(str(int(x)) for x in c_list)
+        print(string_c)
+        
+        #Remove target qubits
+        target_qubits = self.target_qubits
+        target_qubits.sort(reverse = True)
+        for qubit in target_qubits:
+            l = len(string_c)
+            string_c = string_c[:l - qubit - 1] + string_c[l - qubit:]
+
+        #Build Qiskit QuantumCircuit object to prepare the SAE HF state
+        output = QuantumCircuit(len(string_c))
+        for i, bit in enumerate(string_c[::-1]):
+            if bit == '1':
+                output.x(i)
+        
+        return output
+    
+    qiskit_mapper = property(qiskit_mapper)
     hamiltonian = property(hamiltonian)
-    UCC_circuit = property (UCC_circuit)
+    HF_circuit = property(HF_circuit)
 
 #Legacy functions
 

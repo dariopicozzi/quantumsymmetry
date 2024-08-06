@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "quantumsymmetry"
-version = "0.2.00"
+version = "0.2.01"
 description = "Quantum computing research package"
 authors = ["Dario Picozzi"]
 license = "GNU General Public License v3.0"
@@ -9,9 +9,10 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = "^3.7"
 numpy = "*"
-pyscf = "*"
+pyscf = "^2.6"
 openfermion = "*"
-qiskit = "*"
+qiskit = "^1.1"
+qiskit_nature = "^0.7"
 ipython = "*"
 tabulate = "*"
 
