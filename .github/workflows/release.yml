@@ -1,9 +1,7 @@
 name: Release to PyPI
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'  # This triggers the workflow on version tags (e.g., v1.0.0)
+  pull_request
 
 permissions:
   contents: read
