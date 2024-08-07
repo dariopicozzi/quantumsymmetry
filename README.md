@@ -19,7 +19,3 @@ Interested in contributing? Check out the contributing guidelines. Please note t
 ## License
 
 `quantumsymmetry` was created by Dario Picozzi. It is licensed under the terms of the GNU General Public License v3.0 license.
-
-## Credits
-
-`quantumsymmetry` was created with [`cookiecutter`](https://cookiecutter.readthedocs.io/en/latest/) and the `py-pkgs-cookiecutter` [template](https://github.com/py-pkgs/py-pkgs-cookiecutter).
