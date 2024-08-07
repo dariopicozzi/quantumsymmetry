@@ -84,9 +84,9 @@ def test_BeH2_CAS():
     basis = 'sto-3g',
     CAS = (4, 4))
 
-#Ethene molecule (C₂H₄) with STO-3G basis and CAS(4, 4)
+#Ethene molecule (C₂H₄) with STO-3G basis and CAS(8, 8)
 def test_BeH2_CAS():
     assert compare_energies(
     atom = 'C 0 0 0.6695; C 0 0 -0.6695; H 0 0.9289 1.2321; H 0 -0.9289 1.2321; H 0 0.9289 -1.2321; H 0 -0.9289 -1.2321',
     basis = 'sto-3g',
-    CAS = (4, 4))
+    CAS = (8, 8))
