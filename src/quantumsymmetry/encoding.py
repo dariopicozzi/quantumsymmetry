@@ -71,7 +71,7 @@ class Encoding():
         self.nelectron_up = (self.nelectron + self.spin)//2
         self.nelectron_down = (self.nelectron - self.spin)//2
         self.molecule_name = get_molecule_name(self.mol)
-        self.label_orb_symm = symm.label_orb_symm(mol, mol.irrep_name, mol.symm_orb, mf.mo_coeff)
+        self.label_orb_symm = symm.label_orb_symm(mol, mol.irrep_name, mol.symm_orb, self.mo_coeff)
         self.mo_occ = mf.mo_occ
         self.nspinorbital = 2*len(mf.mo_coeff)
 
@@ -227,6 +227,7 @@ class Encoding():
         display(HTML(to_print))
 
     def qiskit_mapper(self):
+        #QubitMapper object
         mapper = QubitMapper()
         mapper.map = self.apply
         return mapper
