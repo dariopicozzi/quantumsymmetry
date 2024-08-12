@@ -7,6 +7,7 @@ from qiskit_nature.second_q.operators import FermionicOp
 from qiskit_nature.second_q.mappers import JordanWignerMapper
 from IPython.display import display, HTML
 from tabulate import tabulate
+from concurrent.futures import ThreadPoolExecutor
 
 def get_character_table(point_group_name):
     """Gets the character table for a Boolean molecular symmetry point group
@@ -475,6 +476,64 @@ def apply_Clifford_tableau(qubit_operator, tableau, tableau_signs):
             elif key[1] == 'Y':
                 operator *= -1j*tableau_signs[key[0]]*tableau_signs[key[0] + n]*QubitOperator(make_string(tableau[key[0]]))*QubitOperator(make_string(tableau[key[0] + n]))
         output += operator
+    return output
+
+def process_term(key, coeff, nspinorbital, tableau, tableau_signs, target_qubits, new_qubits):
+    """Helper function to process a single term of the qubit operator."""
+    operator = coeff
+
+    if key == ():
+        return coeff
+
+    for k in key:
+        if k[1] == 'Z':
+            operator *= tableau_signs[k[0]] * QubitOperator(make_string(tableau[k[0]]))
+        elif k[1] == 'X':
+            operator *= tableau_signs[k[0] + nspinorbital] * QubitOperator(make_string(tableau[k[0] + nspinorbital]))
+        elif k[1] == 'Y':
+            operator *= -1j * tableau_signs[k[0]] * tableau_signs[k[0] + nspinorbital] * QubitOperator(make_string(tableau[k[0]])) * QubitOperator(make_string(tableau[k[0] + nspinorbital]))
+
+    phase = list(operator.terms.values())[0]
+    key = list(operator.terms.keys())[0]
+    new_key = []
+    for k in key:
+        if k[0] in target_qubits:
+            if k[1] == 'X' or k[1] == 'Y':
+                return QubitOperator().zero()
+        else:
+            new_key.append((new_qubits[k[0]], k[1]))
+    return phase*QubitOperator(new_key)
+
+def apply_Clifford_tableau_parallel(self, qubit_operator):
+    """Applies a Clifford tableau to a qubit operator in parallel.
+
+    Args:
+        qubit_operator (openfermion.QubitOperator): the input qubit operator to be transformed by application of the Clifford tableau
+        tableau (2D array): the array in the Clifford tableau
+        tableau_signs (1D array): the signs in the Clifford tableau
+
+    Returns:
+        openfermion.QubitOperator: the transformed qubit operator
+    """
+    output = QubitOperator()
+
+    new_qubits = []
+    c = 0
+    for i in range(self.nspinorbital):
+        if i in self.target_qubits:
+            c += 1
+            new_qubits.append(i)
+        else:
+            new_qubits.append(i - c)
+
+    with ThreadPoolExecutor() as executor:
+        futures = []
+        for key, coeff in qubit_operator.terms.items():
+            futures.append(executor.submit(process_term, key, coeff, self.nspinorbital, self.tableau, self.tableau_signs, self.target_qubits, new_qubits))
+
+        for future in futures:
+            output += future.result()
+
     return output
 
 def simplify_QubitOperator(qubit_operator):
