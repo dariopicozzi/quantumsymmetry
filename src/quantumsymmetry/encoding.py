@@ -10,6 +10,7 @@ from openfermion import QubitOperator, FermionOperator, jordan_wigner, utils, li
 from qiskit import quantum_info
 from qiskit_nature.second_q.operators import FermionicOp
 from qiskit_nature.second_q.mappers import QubitMapper, JordanWignerMapper, InterleavedQubitMapper
+import time
 
 class Encoding():
     def __init__(self, atom, basis, charge = 0, spin = 0, irrep = None, verbose = False, show_lowest_eigenvalue = False, CAS = None, natural_orbitals = False, active_mo = None, output_format = 'openfermion'):
@@ -134,9 +135,8 @@ class Encoding():
         if type(operator) == quantum_info.SparsePauliOp:
             operator = SparsePauliOp_to_QubitOperator(operator)
         if type(operator) == QubitOperator:
-            operator = apply_Clifford_tableau_parallel(self, operator)
-            #operator = apply_Clifford_tableau(operator, self.tableau, self.tableau_signs)
-            #operator = simplify_QubitOperator(project_operator(operator, self.target_qubits))
+            operator = apply_Clifford_tableau(operator, self.tableau, self.tableau_signs)
+            operator = simplify_QubitOperator(project_operator(operator, self.target_qubits))
             if self.output_format == 'openfermion':
                 return operator
             elif self.output_format == 'qiskit':

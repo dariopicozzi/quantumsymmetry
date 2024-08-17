@@ -8,6 +8,7 @@ from qiskit_nature.second_q.mappers import JordanWignerMapper
 from IPython.display import display, HTML
 from tabulate import tabulate
 from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import Pool
 
 def get_character_table(point_group_name):
     """Gets the character table for a Boolean molecular symmetry point group
@@ -478,7 +479,7 @@ def apply_Clifford_tableau(qubit_operator, tableau, tableau_signs):
         output += operator
     return output
 
-def process_term(key, coeff, nspinorbital, tableau, tableau_signs, target_qubits, new_qubits):
+def process_Pauli_term(key, coeff, nspinorbital, tableau, tableau_signs, target_qubits, new_qubits):
     """Helper function to process a single term of the qubit operator."""
     operator = coeff
 
@@ -504,7 +505,7 @@ def process_term(key, coeff, nspinorbital, tableau, tableau_signs, target_qubits
             new_key.append((new_qubits[k[0]], k[1]))
     return phase*QubitOperator(new_key)
 
-def apply_Clifford_tableau_parallel(self, qubit_operator):
+def apply_Clifford_tableau_multithread(self, qubit_operator):
     """Applies a Clifford tableau to a qubit operator in parallel.
 
     Args:
@@ -529,10 +530,48 @@ def apply_Clifford_tableau_parallel(self, qubit_operator):
     with ThreadPoolExecutor() as executor:
         futures = []
         for key, coeff in qubit_operator.terms.items():
-            futures.append(executor.submit(process_term, key, coeff, self.nspinorbital, self.tableau, self.tableau_signs, self.target_qubits, new_qubits))
+            futures.append(executor.submit(process_Pauli_term, key, coeff, self.nspinorbital, self.tableau, self.tableau_signs, self.target_qubits, new_qubits))
 
         for future in futures:
             output += future.result()
+
+    return output
+
+def process_Pauli_term_wrapper(args):
+    return process_Pauli_term(*args)
+
+def apply_Clifford_tableau_multiprocess(self, qubit_operator):
+    """Applies a Clifford tableau to a qubit operator in parallel.
+
+    Args:
+        qubit_operator (openfermion.QubitOperator): the input qubit operator to be transformed by application of the Clifford tableau
+        tableau (2D array): the array in the Clifford tableau
+        tableau_signs (1D array): the signs in the Clifford tableau
+
+    Returns:
+        openfermion.QubitOperator: the transformed qubit operator
+    """
+    output = QubitOperator()
+
+    new_qubits = []
+    c = 0
+    for i in range(self.nspinorbital):
+        if i in self.target_qubits:
+            c += 1
+            new_qubits.append(i)
+        else:
+            new_qubits.append(i - c)
+
+    with Pool() as pool:
+        # Create an iterable of argument tuples
+        args_iterable = [
+            (key, coeff, self.nspinorbital, self.tableau, self.tableau_signs, self.target_qubits, new_qubits)
+            for key, coeff in qubit_operator.terms.items()
+        ]
+        results = pool.map(process_Pauli_term_wrapper, args_iterable)
+
+    for result in results:
+        output += result
 
     return output
 
