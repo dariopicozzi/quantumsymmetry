@@ -506,7 +506,7 @@ def process_Pauli_term(key, coeff, nspinorbital, tableau, tableau_signs, target_
     return phase*QubitOperator(new_key)
 
 def apply_Clifford_tableau_multithread(self, qubit_operator):
-    """Applies a Clifford tableau to a qubit operator in parallel.
+    """Applies a Clifford tableau to a qubit operator in parallel usign multithreading.
 
     Args:
         qubit_operator (openfermion.QubitOperator): the input qubit operator to be transformed by application of the Clifford tableau
@@ -541,7 +541,7 @@ def process_Pauli_term_wrapper(args):
     return process_Pauli_term(*args)
 
 def apply_Clifford_tableau_multiprocess(self, qubit_operator):
-    """Applies a Clifford tableau to a qubit operator in parallel.
+    """Applies a Clifford tableau to a qubit operator in parallel using multiprocessing.
 
     Args:
         qubit_operator (openfermion.QubitOperator): the input qubit operator to be transformed by application of the Clifford tableau
