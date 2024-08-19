@@ -153,8 +153,8 @@ class Encoding():
         MO_irreps_string, orbital_names = get_MO_irreps_string(self.label_orb_symm, self.irrep_labels, html = True)
         qubit_table_string = qubit_table(self.tableau, self.tableau_signs, self.symmetry_target_qubits, orbital_names, self.CAS_qubits)
 
-        hamiltonian_table1, length1, qubits1 = qubit_operator_table(self.jordan_wigner_hamiltonian)
         hamiltonian_table3, length3, qubits3 = qubit_operator_table(self.hamiltonian)
+        hamiltonian_table1, length1, qubits1 = qubit_operator_table(self.jordan_wigner_hamiltonian)
 
         if self.show_lowest_eigenvalue == True: 
             ground_state1 = linalg.get_ground_state(linalg.get_sparse_operator(self.jordan_wigner_hamiltonian))
@@ -272,7 +272,9 @@ class Encoding():
 #Legacy functions
 
 def reduced_hamiltonian(atom, basis, charge = 0, spin = 0, irrep = None, verbose = True, show_lowest_eigenvalue = False, CAS = None, active_mo = None, natural_orbitals = False, output_format = 'openfermion'):
-    encoding = Encoding(atom = atom, basis = basis, charge = charge, spin = spin, irrep = irrep, verbose = verbose, show_lowest_eigenvalue = show_lowest_eigenvalue, CAS = CAS, natural_orbitals = natural_orbitals, active_mo = active_mo, output_format = output_format)
+    encoding = Encoding(atom = atom, basis = basis, charge = charge, spin = spin, irrep = irrep, show_lowest_eigenvalue = show_lowest_eigenvalue, CAS = CAS, natural_orbitals = natural_orbitals, active_mo = active_mo, output_format = output_format)
+    if verbose == True:
+        encoding.report(show_lowest_eigenvalue = show_lowest_eigenvalue)
     return encoding.hamiltonian
 
 def make_encoding(atom, basis, charge = 0, spin = 0, irrep = None, CAS = None, natural_orbitals = False, active_mo = None):
