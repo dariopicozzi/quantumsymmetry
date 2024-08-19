@@ -102,8 +102,8 @@ class Encoding():
             self.CAS_qubits = None
     
     def get_CAS_encoding(self):
+        self.symmetry_target_qubits = self.target_qubits
         if self.CAS != None:
-            self.symmetry_target_qubits = self.target_qubits
             self.target_qubits = self.frozen_core_orbitals + self.target_qubits + self.virtual_orbitals
             
             #Update tableau signs for CAS
