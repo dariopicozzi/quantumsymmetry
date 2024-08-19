@@ -73,6 +73,21 @@ jobs:
         inputs: >-
           ./dist/*.tar.gz
           ./dist/*.whl
+    - name: Install toml-cli
+      run: pip install toml-cli
+    - name: Extract release name from .toml
+      id: extract_release_name
+      run: echo "RELEASE_NAME=$(toml get pyproject.toml release.name)" >> $GITHUB_ENV
+    - name: Create GitHub Release
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        RELEASE_NAME: ${{ env.RELEASE_NAME }}
+      run: >-
+        gh release create
+        '${{ github.ref_name }}'
+        --repo '${{ github.repository }}'
+        --title "${{ env.RELEASE_NAME }}"
+        --notes ""
     - name: Create GitHub Release
       env:
         GITHUB_TOKEN: ${{ github.token }}
