@@ -49,6 +49,28 @@ jobs:
     - name: Publish distribution 📦 to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
 
+  create-tag:
+    name: Create and Push Tag
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Install toml-cli
+      run: pip install toml-cli
+    - name: Extract release name from .toml
+      id: extract_release_name
+      run: echo "RELEASE_NAME=$(toml get pyproject.toml release.name)" >> $GITHUB_ENV
+    - name: Create and push tag
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        RELEASE_NAME: ${{ env.RELEASE_NAME }}
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git tag $RELEASE_NAME
+        git push origin $RELEASE_NAME
+
   github-release:
     name: >-
       Sign the Python 🐍 distribution 📦 with Sigstore
@@ -73,27 +95,18 @@ jobs:
         inputs: >-
           ./dist/*.tar.gz
           ./dist/*.whl
-    - name: Install toml-cli
-      run: pip install toml-cli
-    - name: Extract release name from .toml
-      id: extract_release_name
-      run: echo "RELEASE_NAME=$(toml get pyproject.toml release.name)" >> $GITHUB_ENV
     - name: Create GitHub Release
       env:
-        GITHUB_TOKEN: ${{ github.token }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         RELEASE_NAME: ${{ env.RELEASE_NAME }}
       run: >-
         gh release create
         '${{ env.RELEASE_NAME }}'
         --repo '${{ github.repository }}'
-        --title "${{ env.RELEASE_NAME }}"
         --notes ""
     - name: Upload artifact signatures to GitHub Release
       env:
-        GITHUB_TOKEN: ${{ github.token }}
-      # Upload to GitHub Release using the `gh` CLI.
-      # `dist/` contains the built packages, and the
-      # sigstore-produced signatures and certificates.
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: >-
         gh release upload
         '${{ env.RELEASE_NAME }}' dist/**
