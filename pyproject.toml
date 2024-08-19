@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "quantumsymmetry"
-version = "0.2.01"
+version = "0.2.02"
 description = "Quantum computing research package"
 authors = ["Dario Picozzi"]
 license = "GNU General Public License v3.0"
