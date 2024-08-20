@@ -741,6 +741,8 @@ def qubit_operator_table(qubit_operator):
         int: the number of terms
         int: the number of qubits the operator acts on
     """
+    if type(qubit_operator) == quantum_info.SparsePauliOp:
+        qubit_operator = SparsePauliOp_to_QubitOperator(qubit_operator)
     threshold = 25
     table = list()
     subscripts = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
