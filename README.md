@@ -1,4 +1,4 @@
-<img src="docs/quantumsymmetry_logo.png" alt="QuantumSymmetry" width="500"/>
+<img src="docs/quantumsymmetry_logo.png" alt="QuantumSymmetry" width="450"/>
 
 [![PyPI version](https://badge.fury.io/py/quantumsymmetry.svg)](https://badge.fury.io/py/quantumsymmetry)
 
