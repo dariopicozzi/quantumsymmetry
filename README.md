@@ -27,7 +27,7 @@ Interactive tutorials on Google Colab can be found [here](https://colab.research
 
 ## Getting in touch
 
-For any question about QuantumSymmetry or my research, don't hesitate to get in touch
+For any question about QuantumSymmetry or my research, don't hesitate to get in touch.
 
 ## License
 
