@@ -1,5 +1,7 @@
 <img src="docs/quantumsymmetry_logo.png" alt="QuantumSymmetry" width="500"/>
 
+[![PyPI version](https://badge.fury.io/py/quantumsymmetry.svg)](https://badge.fury.io/py/quantumsymmetry)
+
 # QuantumSymmetry
 
 QuantumSymmetry is an open-source Python package for research in molecular physics using quantum computing. It allows to encode more efficiently information about a molecular system on a quantum computer using symmetry-adapted encodings.
