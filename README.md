@@ -8,7 +8,7 @@ QuantumSymmetry is an open-source Python package for research in molecular physi
 
 QuantumSymmetry uses [PySCF](https://github.com/pyscf/pyscf) to perform Hartre-Fock calculations, for the calculation of one- and two-electron integrals and the construction of symmetry-adapted molecular orbitals. It automatically retrieves from PySCF the largest Boolean symmetry group for the input molecular geometry, as well as the irreducible representation of its HF ground state.
 
-It is compatible with both [OpenFermion](https://github.com/quantumlib/OpenFermion) and [Qiskit](https://github.com/Qiskit). QuantumSymmetry takes arbitrary user input such as the molecular geometry and the atomic basis set and allows the user to construct the qubit operators that correspond to fermionic operators on the molecular system in the appropriate symmetry-adapted encoding.
+QuantumSymmetry takes arbitrary user input such as the molecular geometry and the atomic basis set and allows the user to construct the qubit operators that correspond to fermionic operators on the molecular system in the appropriate symmetry-adapted encoding. It is compatible with both [OpenFermion](https://github.com/quantumlib/OpenFermion) and [Qiskit](https://github.com/Qiskit).
 
 ## Installation
 
@@ -17,9 +17,26 @@ You can install QuantumSymmetry by running the following command from terminal:
 $ pip install quantumsymmetry
 ```
 
+## Quickstart
+
+In QuantumSymmetry, information about a symmetry-adapted encoding is in an `Encoding` object:
+```python
+from quantumsymmetry import Encoding
+
+encoding = Encoding(
+    atom = 'H 0 0 0; H 0.7414 0 0',
+    basis = 'sto-3g')
+```
+
+This can be used for example to obtain the symmetry-adapted encoding qubit hamiltonian:
+
+```python
+encoding.hamiltonian
+```
+
 ## Tutorials
 
-Interactive tutorials on Google Colab can be found [here](https://colab.research.google.com/github/dariopicozzi/quantumsymmetry/blob/master/docs/tutorials/01_welcome.ipynb).
+Interactive tutorials with code snippets hosted on Google Colab can be found [here](https://colab.research.google.com/github/dariopicozzi/quantumsymmetry/blob/master/docs/tutorials/01_welcome.ipynb).
 
 ## How to cite
 
