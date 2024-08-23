@@ -13,6 +13,7 @@ QuantumSymmetry takes arbitrary user input such as the molecular geometry and th
 ## Installation
 
 You can install QuantumSymmetry by running the following command from terminal:
+
 ```bash
 $ pip install quantumsymmetry
 ```
@@ -20,6 +21,7 @@ $ pip install quantumsymmetry
 ## Quickstart
 
 In QuantumSymmetry, information about a symmetry-adapted encoding is in an `Encoding` object:
+
 ```python
 from quantumsymmetry import Encoding
 
@@ -28,7 +30,7 @@ encoding = Encoding(
     basis = 'sto-3g')
 ```
 
-This can be used for example to obtain the symmetry-adapted encoding qubit hamiltonian:
+This can be used for example to obtain the symmetry-adapted encoding qubit Hamiltonian:
 
 ```python
 encoding.hamiltonian
