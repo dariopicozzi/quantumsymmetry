@@ -32,8 +32,10 @@ jobs:
 
   test:
     name: Test distribution
+    needs:
+      - build
     runs-on: ubuntu-latest
-
+    
     steps:
     - name: Download all the dists
       uses: actions/download-artifact@v4
@@ -57,7 +59,7 @@ jobs:
   publish-to-pypi:
     name: Publish to PyPI
     needs:
-    - build
+    - test
     runs-on: ubuntu-latest
     environment:
       name: pypi
