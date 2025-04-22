@@ -32,13 +32,52 @@ class Encoding():
         self.run_pyscf()
         
         self.character_table, self.conj_labels, self.irrep_labels, self.conj_descriptions = get_character_table(self.groupname)
-        if self.irrep == None:
-            self.irrep =  find_ground_state_irrep(self.label_orb_symm, self.mo_occ, self.character_table, self.irrep_labels)
+        if self.irrep is None:
+            if self.symmetry:
+                self.irrep = find_ground_state_irrep(
+                    self.label_orb_symm,
+                    self.mo_occ,
+                    self.character_table,
+                    self.irrep_labels
+                )
+            else:
+                self.irrep = self.irrep_labels[0]
         self.get_CAS_qubits()
-        self.symmetry_generator_labels, self.symmetry_generators_strings, self.target_qubits, self.symmetry_generators, self.signs, self.descriptions = find_symmetry_generators(self.mol, self.irrep, self.label_orb_symm, self.CAS_qubits)
-        self.tableau, self.tableau_signs = make_clifford_tableau(self.symmetry_generators, self.signs, self.target_qubits)    
-        self.get_CAS_encoding()
-        
+
+        if self.symmetry:
+            (self.symmetry_generator_labels,
+            self.symmetry_generators_strings,
+            self.target_qubits,
+            self.symmetry_generators,
+            self.signs,
+            self.descriptions) = find_symmetry_generators(
+                                        self.mol,
+                                        self.irrep,
+                                        self.label_orb_symm,
+                                        self.CAS_qubits
+                                    )
+            self.tableau, self.tableau_signs = make_clifford_tableau(
+                                        self.symmetry_generators,
+                                        self.signs,
+                                        self.target_qubits
+                                    )
+        else:
+            self.symmetry_generator_labels = []
+            self.symmetry_generators_strings = []
+            self.target_qubits = []
+            self.symmetry_generators = []
+            self.signs = []
+            self.descriptions = []
+            n = 2 * len(self.mf.mo_coeff)
+            self.tableau = [
+                [ -1 if i == j else 1
+                for j in range(2*n) ]
+                for i in range(2*n)
+            ]
+            self.tableau_signs = [1] * (2*n)
+
+        self.get_CAS_encoding()     
+
     def _repr_html_(self):
         if self.verbose == True:
             return self.report(show_lowest_eigenvalue = self.show_lowest_eigenvalue)
@@ -73,7 +112,12 @@ class Encoding():
         self.nelectron_up = (self.nelectron + self.spin)//2
         self.nelectron_down = (self.nelectron - self.spin)//2
         self.molecule_name = get_molecule_name(self.mol)
-        self.label_orb_symm = symm.label_orb_symm(mol, mol.irrep_name, mol.symm_orb, mf.mo_coeff)
+        if self.symmetry:
+            self.label_orb_symm = symm.label_orb_symm(
+                mol, mol.irrep_name, mol.symm_orb, mf.mo_coeff
+            )
+        else:
+            self.label_orb_symm = [None] * mf.mo_coeff.shape[1]
         self.mo_occ = mf.mo_occ
         self.nspinorbital = 2*len(mf.mo_coeff)
 
@@ -111,15 +155,19 @@ class Encoding():
             CAS_tableau_signs = [1]*2*self.nspinorbital
             for x in self.frozen_core_orbitals:
                 CAS_tableau_signs[x] = -1
-            e = np.array(self.tableau)
-            e = (1 - e) // 2
-            e = np.linalg.inv(e)
-            s = np.matmul(e, (1 -np.array(CAS_tableau_signs))//2) % 2
-            s += (1-self.tableau_signs)//2
-            s = s%2
-            s = -2*s + 1
-            self.tableau_signs = (s).astype(int).tolist()
-        
+            if self.symmetry:
+                s = (1 -np.array(CAS_tableau_signs))//2
+                e = np.array(self.tableau)
+                e = (1 - e) // 2
+                e = np.linalg.inv(e)
+                s = np.matmul(e, (1 -np.array(CAS_tableau_signs))//2) % 2
+                s += (1-self.tableau_signs)//2
+                s = s%2
+                s = -2*s + 1
+                self.tableau_signs = (s).astype(int).tolist()
+            else:
+                self.tableau_signs = CAS_tableau_signs
+
     def apply(self, operator):
         if type(operator) == dict:
             for key in operator:

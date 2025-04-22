@@ -3,9 +3,9 @@ from numpy.linalg import eigvalsh
 from numpy import isclose
 from pyscf import gto, scf, fci, mcscf
 
-def compare_energies(atom, basis, charge = 0, spin = 0, CAS = None, active_mo = None):
+def compare_energies(atom, basis, charge = 0, spin = 0, CAS = None, active_mo = None, symmetry = True):
     #Finds lowest eigenvalue of symmetry-adapted qubit Hamiltonian
-    encoding = Encoding(atom = atom, basis = basis, charge = charge, spin = spin, verbose = False, CAS = CAS, output_format = 'qiskit', active_mo = active_mo)
+    encoding = Encoding(atom = atom, basis = basis, charge = charge, spin = spin, symmetry= symmetry, verbose = False, CAS = CAS, output_format = 'qiskit', active_mo = active_mo)
     H = encoding.hamiltonian
     H = H.to_matrix()
     print(type(H))
@@ -61,6 +61,14 @@ def test_H2O_CAS():
     basis = 'sto-3g',
     CAS = (4, 4))
 
+#Water molecule (H2O) with STO-3G basis, CAS(4, 4) and no symmetry
+def test_H2O_CAS_no_symmetry():
+    assert compare_energies(
+    atom = 'O 0 0 0.1197; H 0 0.7616 -0.4786; H 0 -0.7616 -0.4786',
+    basis = 'sto-3g',
+    CAS = (4, 4),
+    symmetry = False)
+
 #Water molecule (H2O) with STO-3G basis and CAS(4, 4) and active molecular orbital selection
 def test_H2O_CAS_active_mo():
     assert compare_energies(
@@ -76,6 +84,15 @@ def test_O2_CAS():
     spin = 2,
     basis = 'sto-3g',
     CAS = (4, 4))
+
+#Oxygen molecule (O2) with STO-3G basis, CAS(4, 4) and no symmetry
+def test_O2_CAS_no_symmetry():
+    assert compare_energies(
+    atom = 'O 0 0 0; O 0 0 1.189',
+    spin = 2,
+    basis = 'sto-3g',
+    CAS = (4, 4),
+    symmetry = False)
 
 #Beryllium hydrade (BeH2) with STO-3G basis and CAS(4, 4)
 def test_BeH2_CAS():
