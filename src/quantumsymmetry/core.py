@@ -1398,8 +1398,12 @@ def reduced_hamiltonian(atom, basis, charge = 0, spin = 0, irrep = None, verbose
         '<p><i>(' + f'{length1:,}' + ' terms on ' + str(qubits1) + ' qubits)</i></p>')
         if show_lowest_eigenvalue == True:
             to_print += '<p>Its lowest eigenvalue is ' + f'{ground_state1[0]:.15f}' + ' Ha.</p>'
+        to_print += ('<h2>Block-diagonal Hamiltonian</h2>' +
+        '<p>The <b>block-diagonal Hamiltonian</b> obtained by changing basis by applying the Clifford tableau above is given by:</p>' +
+        hamiltonian_table2 +
+        '<p><i>(' + f'{length1:,}' + ' terms on ' + str(qubits1) + ' qubits)</i></p>')
         to_print += ('<h2>Qubit-reduced Hamiltonian</h2>' +
-        '<p>The <b>qubit-reduced Hamiltonian</b> in the symmetry-adapted encoding (obtained by changing basis by applying the Clifford tableau above, eliminating the redundant qubits and relabelling the remaining qubits) is:</p>' +
+        '<p>The <b>qubit-reduced Hamiltonian</b> in the symmetry-adapted encoding obtained from the block-diagonal Hamiltonian by eliminating the redundant qubits and relabelling the remaining qubits is:</p>' +
         hamiltonian_table3 +
         '<p><i>(' + f'{length3:,}' + ' terms on ' + str(qubits3) + ' qubits)</i></p>')
         if show_lowest_eigenvalue == True:

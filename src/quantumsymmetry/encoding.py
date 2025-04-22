@@ -13,12 +13,13 @@ from qiskit_nature.second_q.mappers import QubitMapper, JordanWignerMapper, Inte
 import time
 
 class Encoding():
-    def __init__(self, atom, basis, charge = 0, spin = 0, irrep = None, verbose = False, show_lowest_eigenvalue = False, CAS = None, natural_orbitals = False, active_mo = None, output_format = 'openfermion'):
+    def __init__(self, atom, basis, charge = 0, spin = 0, irrep = None, symmetry = True, verbose = False, show_lowest_eigenvalue = False, CAS = None, natural_orbitals = False, active_mo = None, output_format = 'openfermion'):
         self.atom = atom
         self.basis = basis
         self.charge = charge
         self.spin = spin
         self.irrep = irrep
+        self.symmetry = symmetry
         self.verbose = verbose
         self.show_lowest_eigenvalue = show_lowest_eigenvalue
         self.CAS = CAS
@@ -45,16 +46,16 @@ class Encoding():
     def run_pyscf(self):
         mol = gto.Mole()
         mol.atom = self.atom
-        mol.symmetry = True
+        mol.symmetry = self.symmetry
         mol.basis = self.basis
         mol.charge = self.charge
         mol.spin = self.spin
         mol.verbose = 0
         mol.build()
-        if mol.groupname == 'Dooh' or mol.groupname == 'SO3':
+        if (self.symmetry == True) and (mol.groupname == 'Dooh' or mol.groupname == 'SO3'):
             mol.symmetry = 'D2h'
             mol.build()
-        if mol.groupname == 'Coov':
+        elif (self.symmetry == True) and (mol.groupname == 'Coov'):
             mol.symmetry = 'C2v'
             mol.build()
         mf = scf.RHF(mol)
