@@ -171,7 +171,7 @@ def reduced_row_echelon_generators(symmetry_generators, signs, active_space_qubi
     
     return symmetry_generators, signs, target_qubits
 
-def find_symmetry_generators(mol, irrep, orbital_labels, CAS_qubits = None):
+def find_symmetry_generators(mol, irrep, orbital_labels, CAS_qubits=None, nelec_spin_override=None):
     """Returns the symmetry generators computed using the get_generators function, as well as the eigensector of interest for each symmetry generator
 
     Args:
@@ -269,8 +269,13 @@ def find_symmetry_generators(mol, irrep, orbital_labels, CAS_qubits = None):
     n_alpha = -1*n_beta
 
     #signs of P↑ and P↓
-    number_up = (mol.nelectron + mol.spin)//2
-    number_down = (mol.nelectron - mol.spin)//2
+    if nelec_spin_override is not None:
+        nelec_eff, spin_eff = nelec_spin_override
+    else:
+        nelec_eff, spin_eff = mol.nelectron, mol.spin
+
+    number_up = (nelec_eff + spin_eff)//2
+    number_down = (nelec_eff - spin_eff)//2
     
     n_alpha_sign = (-1)**number_up
     n_beta_sign = (-1)**number_down
@@ -690,6 +695,47 @@ def get_hamiltonian(mol, mf):
 
     qubit_hamiltonian = jordan_wigner(fermion_hamiltonian)
 
+    return qubit_hamiltonian, fermion_hamiltonian
+
+def get_CAS_hamiltonian(mol, mf, CAS, active_mo=None):
+    mc = mcscf.CASCI(mf, ncas=CAS[1], nelecas=CAS[0])
+    mc.verbose = 0
+    if active_mo is None:
+        mc.kernel()
+    else:
+        mo = mc.sort_mo(active_mo)
+        mc.kernel(mo)
+
+    # 1e effective Hamiltonian in active MOs and the core energy
+    h1e, e_core = mc.h1e_for_cas()
+
+    # 2e integrals in active space
+    eri_ao = mol.intor('int2e_sph')
+    eri_mo = ao2mo.incore.full(eri_ao, mc.mo_coeff, compact=False)
+    nmo = mc.mo_coeff.shape[1]
+    eri_mo = eri_mo.reshape(nmo, nmo, nmo, nmo)
+    a = np.arange(mc.ncore, mc.ncore + mc.ncas)
+    two_electron_integrals = eri_mo[np.ix_(a, a, a, a)]
+
+    fermion_hamiltonian = FermionOperator()
+    number_of_MOs = mc.ncas
+
+    for p in range(number_of_MOs):
+        for q in range(number_of_MOs):
+            fermion_hamiltonian += h1e[p, q] * FermionOperator(f'{2*p}^ {2*q}')
+            fermion_hamiltonian += h1e[p, q] * FermionOperator(f'{2*p+1}^ {2*q+1}')
+
+    for p in range(number_of_MOs):
+        for q in range(number_of_MOs):
+            for r in range(number_of_MOs):
+                for s in range(number_of_MOs):
+                    Vpsqr = two_electron_integrals[p, s, q, r]
+                    fermion_hamiltonian += 0.5 * Vpsqr * FermionOperator(f'{2*p}^ {2*q}^ {2*r} {2*s}')
+                    fermion_hamiltonian +=       Vpsqr * FermionOperator(f'{2*p}^ {2*q+1}^ {2*r+1} {2*s}')
+                    fermion_hamiltonian += 0.5 * Vpsqr * FermionOperator(f'{2*p+1}^ {2*q+1}^ {2*r+1} {2*s+1}')
+
+    fermion_hamiltonian += e_core   # <-- correct constant
+    qubit_hamiltonian = jordan_wigner(fermion_hamiltonian)
     return qubit_hamiltonian, fermion_hamiltonian
 
 def print_character_tables():

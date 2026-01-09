@@ -9,7 +9,7 @@ from qiskit_nature.second_q.circuit.library import UCCSD, HartreeFock
 from qiskit_nature.second_q.algorithms import GroundStateEigensolver
 from numpy import isclose
 
-def UCC_VQE(atom, basis, charge = 0, spin = 0, CAS = None, encoding_type = 'SAE'):
+def UCC_VQE(atom, basis, charge = 0, spin = 0, CAS = None, quick_CAS = False, encoding_type = 'SAE', symmetry = True):
     driver = PySCFDriver(
         atom= atom,
         unit=DistanceUnit.ANGSTROM,
@@ -20,7 +20,7 @@ def UCC_VQE(atom, basis, charge = 0, spin = 0, CAS = None, encoding_type = 'SAE'
     problem = driver.run()
 
     if encoding_type == 'SAE':
-        encoding = Encoding(atom = atom, basis = basis, charge = charge, spin = spin, CAS = CAS, output_format = 'qiskit')
+        encoding = Encoding(atom = atom, basis = basis, charge = charge, spin = spin, CAS = CAS, quick_CAS = quick_CAS, symmetry=symmetry, output_format = 'qiskit')
         mapper = encoding.qiskit_mapper
         initial_state = encoding.HF_circuit
     
@@ -77,3 +77,28 @@ def test_UCC_circuit_H2O_CAS():
     energy = UCC_VQE(atom = atom, basis = basis, charge = charge, spin = spin, CAS = CAS, encoding_type = 'SAE')
 
     assert isclose(energy, -74.97227790592032)
+
+def test_UCC_circuit_H2O_CAS_quick():
+    #Parameters for H2O in the sto-3g basis with CAS(4, 4)
+    atom = 'O 0 0 0.1197; H 0 0.7616 -0.4786; H 0 -0.7616 -0.4786'
+    basis = 'sto3g'
+    charge = 0
+    spin = 0
+    CAS = (4, 4)
+
+    energy = UCC_VQE(atom = atom, basis = basis, charge = charge, spin = spin, CAS = CAS, quick_CAS = True, encoding_type = 'SAE')
+
+    assert isclose(energy, -74.97227790592032)
+
+def test_UCC_circuit_H2_no_symmetry():
+    #Parameters for H2 in the sto-3g basis with no symmetry
+    atom = 'H 0 0 0; H 0.7414 0 0'
+    charge = 0
+    spin = 0
+    basis = 'dz'
+    CAS = (2, 2)
+    symmetry = False
+
+    energy = UCC_VQE(atom = atom, basis = basis, charge = charge, spin = spin, encoding_type = 'SAE', CAS = CAS, symmetry = symmetry)
+    
+    assert isclose(energy, -1.1331269927574912)

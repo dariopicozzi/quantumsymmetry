@@ -13,7 +13,7 @@ from qiskit_nature.second_q.mappers import QubitMapper, JordanWignerMapper, Inte
 import time
 
 class Encoding():
-    def __init__(self, atom, basis, charge = 0, spin = 0, irrep = None, symmetry = True, verbose = False, show_lowest_eigenvalue = False, CAS = None, natural_orbitals = False, active_mo = None, output_format = 'openfermion'):
+    def __init__(self, atom, basis, charge = 0, spin = 0, irrep = None, symmetry = True, verbose = False, show_lowest_eigenvalue = False, CAS = None, quick_CAS=False, natural_orbitals = False, active_mo = None, output_format = 'openfermion'):
         self.atom = atom
         self.basis = basis
         self.charge = charge
@@ -23,6 +23,7 @@ class Encoding():
         self.verbose = verbose
         self.show_lowest_eigenvalue = show_lowest_eigenvalue
         self.CAS = CAS
+        self.quick_CAS = quick_CAS
         self.natural_orbitals = natural_orbitals
         self.active_mo = active_mo
         output_format = output_format.lower().replace('_', '').replace(' ', '')     
@@ -44,6 +45,7 @@ class Encoding():
                 self.irrep = self.irrep_labels[0]
         self.get_CAS_qubits()
 
+
         if self.symmetry:
             (self.symmetry_generator_labels,
             self.symmetry_generators_strings,
@@ -51,16 +53,17 @@ class Encoding():
             self.symmetry_generators,
             self.signs,
             self.descriptions) = find_symmetry_generators(
-                                        self.mol,
-                                        self.irrep,
-                                        self.label_orb_symm,
-                                        self.CAS_qubits
-                                    )
+                self.mol,
+                self.irrep,
+                self.label_orb_symm,
+                self.CAS_qubits
+            )
             self.tableau, self.tableau_signs = make_clifford_tableau(
-                                        self.symmetry_generators,
-                                        self.signs,
-                                        self.target_qubits
-                                    )
+                self.symmetry_generators,
+                self.signs,
+                self.target_qubits
+            )
+
         else:
             self.symmetry_generator_labels = []
             self.symmetry_generators_strings = []
@@ -69,6 +72,7 @@ class Encoding():
             self.signs = []
             self.descriptions = []
             n = 2 * len(self.mf.mo_coeff)
+            self.nspinorbital = n
             self.tableau = [
                 [ -1 if i == j else 1
                 for j in range(2*n) ]
@@ -174,9 +178,27 @@ class Encoding():
                 operator.update({key: self.apply(operator[key])})
             return operator
         if type(operator) == list:
-            for i in range(len(operator)):
-                operator[i] = self.apply(operator[i])
-            return operator
+            output = []
+            for item in operator:
+                mapped = self.apply(item)
+                # Drop mapped zero operators to keep ansatz compact.
+                # This is especially important when a CAS/projected encoding makes
+                # many UCC excitations identically zero.
+                if type(mapped) == quantum_info.SparsePauliOp:
+                    try:
+                        if mapped.size == 0:
+                            continue
+                        # Only drop *exactly* zero operators.
+                        # Using allclose() can incorrectly remove small-but-nonzero terms
+                        # and change the ansatz/energy.
+                        if mapped.coeffs.size == 0:
+                            continue
+                        if np.all(mapped.coeffs == 0):
+                            continue
+                    except Exception:
+                        pass
+                output.append(mapped)
+            return output
         if type(operator) == FermionOperator:
             operator = jordan_wigner(operator)
         if type(operator) == FermionicOp:
@@ -189,13 +211,36 @@ class Encoding():
             if self.output_format == 'openfermion':
                 return operator
             elif self.output_format == 'qiskit':
-                operator = QubitOperator_to_PauliSumOp(operator, num_qubits= self.nspinorbital - len(self.target_qubits))
+                num_qubits = self.nspinorbital - len(self.target_qubits)
+                operator = QubitOperator_to_PauliSumOp(operator, num_qubits=num_qubits)
             return operator
         else:
             raise TypeError("Unsupported input type")
     
     def hamiltonian(self):
-        self.jordan_wigner_hamiltonian, self.fermion_hamiltonian = get_hamiltonian(self.mol, self.mf)
+        def _remap_qubit_operator_indices(qubit_operator, index_map):
+            remapped = QubitOperator()
+            for term, coeff in qubit_operator.terms.items():
+                if not term:
+                    remapped += coeff * QubitOperator(())
+                    continue
+                new_term = tuple((index_map[q], p) for (q, p) in term)
+                remapped += coeff * QubitOperator(new_term)
+            return remapped
+
+        if self.quick_CAS and self.CAS is not None:
+            cas_qubit_hamiltonian, self.fermion_hamiltonian = (
+                get_CAS_hamiltonian(self.mol, self.mf, self.CAS, active_mo=self.active_mo)
+            )
+            # Embed the CAS Hamiltonian into the full spin-orbital indexing so that
+            # it can be consistently transformed/projected by the full-space tableau.
+            index_map = {i: self.active_space_orbitals[i] for i in range(len(self.active_space_orbitals))}
+            self.jordan_wigner_hamiltonian = _remap_qubit_operator_indices(cas_qubit_hamiltonian, index_map)
+        else:
+            self.jordan_wigner_hamiltonian, self.fermion_hamiltonian = (
+                get_hamiltonian(self.mol, self.mf)
+            )
+
         return self.apply(self.jordan_wigner_hamiltonian)
 
     def report(self, html = True, show_lowest_eigenvalue = False):
