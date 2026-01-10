@@ -1083,6 +1083,65 @@ def find_ground_state_irrep(orbital_labels, mo_occ, character_table, irrep_label
             irrep = irrep_labels[i]
     return irrep
 
+def make_BK_T(n_qubits):
+    """
+    Return the JW->BK basis change matrix T over GF(2) as an (n,n) numpy array.
+
+    Convention (0-indexed orbitals/qubits):
+      b = T @ f  (mod 2)
+    where f is the vector of occupation bits in JW ordering, and b is the BK bit vector.
+
+    Row i has 1s on columns [i - lsb(i+1) + 1, ..., i],
+    where lsb(x) is the least-significant set bit of x.
+    """
+    n = int(n_qubits)
+    if n < 0:
+        raise ValueError("n_qubits must be non-negative")
+    T = np.zeros((n, n), dtype=np.uint8)
+
+    for i in range(n):
+        lsb = (i + 1) & (-(i + 1))   # least significant set bit of (i+1)
+        start = i - lsb + 1
+        T[i, start:i+1] = 1
+
+    return T
+
+def gf2_inv(A):
+    """Inverse of an (n,n) binary matrix over GF(2)."""
+    A = (A.copy() & 1).astype(np.uint8)
+    n = A.shape[0]
+    if A.shape != (n, n):
+        raise ValueError("A must be square")
+
+    I = np.eye(n, dtype=np.uint8)
+    M = np.concatenate([A, I], axis=1)  # [A | I]
+
+    # Gauss-Jordan elimination over GF(2)
+    row = 0
+    for col in range(n):
+        # find pivot
+        pivot = None
+        for r in range(row, n):
+            if M[r, col] == 1:
+                pivot = r
+                break
+        if pivot is None:
+            raise ValueError("Matrix is singular over GF(2)")
+
+        # swap into place
+        if pivot != row:
+            M[[row, pivot]] = M[[pivot, row]]
+
+        # eliminate other rows
+        for r in range(n):
+            if r != row and M[r, col] == 1:
+                M[r, :] ^= M[row, :]
+
+        row += 1
+
+    invA = M[:, n:]
+    return invA
+
 def qubit_table(tableau, tableau_signs, target_qubits, orbital_names, CAS_qubits = None):
     """Creates an HTML table showing how the symmetry-adapted encoding stores information about occupancy of the spin-orbitals in each qubit
 

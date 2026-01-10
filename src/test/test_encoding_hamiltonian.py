@@ -1,6 +1,7 @@
 from ..quantumsymmetry import Encoding
 from numpy.linalg import eigvalsh
 from numpy import isclose
+import numpy as np
 from pyscf import gto, scf, fci, mcscf
 
 def compare_energies(atom, basis, charge = 0, spin = 0, CAS = None, active_mo = None, symmetry = True):
@@ -34,6 +35,24 @@ def test_H2():
     assert compare_energies(
     atom = 'H 0 0 0; H 0.7414 0 0',
     basis = 'sto-3g')
+
+def test_H2_BK_spectrum_invariant():
+    atom = 'H 0 0 0; H 0.7414 0 0'
+    basis = 'sto-3g'
+    enc_jw = Encoding(atom=atom, basis=basis, verbose=False, output_format='qiskit', bravyi_kitaev=False)
+    enc_bk = Encoding(atom=atom, basis=basis, verbose=False, output_format='qiskit', bravyi_kitaev=True)
+    e1 = eigvalsh(enc_jw.hamiltonian.to_matrix())
+    e2 = eigvalsh(enc_bk.hamiltonian.to_matrix())
+    assert np.allclose(np.sort(e1), np.sort(e2))
+
+def test_H2O_BK_groundstate_invariant():
+    atom = 'O 0 0 0.1197; H 0 0.7616 -0.4786; H 0 -0.7616 -0.4786'
+    basis = 'sto-3g'
+    enc_jw = Encoding(atom=atom, basis=basis, verbose=False, output_format='qiskit', bravyi_kitaev=False)
+    enc_bk = Encoding(atom=atom, basis=basis, verbose=False, output_format='qiskit', bravyi_kitaev=True)
+    e0_jw = eigvalsh(enc_jw.hamiltonian.to_matrix())[0]
+    e0_bk = eigvalsh(enc_bk.hamiltonian.to_matrix())[0]
+    assert isclose(e0_jw, e0_bk)
 
 #Hydrogen molecule (H2) with double-zeta basis
 def test_H2_DZ():

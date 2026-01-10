@@ -3,6 +3,7 @@
 from ..quantumsymmetry import Encoding
 from numpy.linalg import eigvalsh
 from numpy import isclose
+import numpy as np
 from pyscf import gto, scf, mcscf, fci
 
 def compare_energies_quick(atom, basis, charge=0, spin=0, CAS=None, active_mo=None, symmetry=True):
@@ -45,6 +46,16 @@ def test_H2O_CAS_quick():
         basis='sto-3g',
         CAS=(4, 4)
     )
+
+def test_H2_CAS_quick_BK_spectrum_invariant():
+    atom = 'H 0 0 0; H 0.7414 0 0'
+    basis = 'sto-3g'
+    CAS = (2, 2)
+    enc_jw = Encoding(atom=atom, basis=basis, verbose=False, CAS=CAS, quick_CAS=True, output_format='qiskit', bravyi_kitaev=False)
+    enc_bk = Encoding(atom=atom, basis=basis, verbose=False, CAS=CAS, quick_CAS=True, output_format='qiskit', bravyi_kitaev=True)
+    e1 = eigvalsh(enc_jw.hamiltonian.to_matrix())
+    e2 = eigvalsh(enc_bk.hamiltonian.to_matrix())
+    assert np.allclose(np.sort(e1), np.sort(e2))
 
 # H2O, STO-3G, CAS(4,4), no symmetry
 def test_H2O_CAS_no_symmetry_quick():

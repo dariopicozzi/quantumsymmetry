@@ -13,7 +13,7 @@ from qiskit_nature.second_q.mappers import QubitMapper, JordanWignerMapper, Inte
 import time
 
 class Encoding():
-    def __init__(self, atom, basis, charge = 0, spin = 0, irrep = None, symmetry = True, verbose = False, show_lowest_eigenvalue = False, CAS = None, quick_CAS=False, natural_orbitals = False, active_mo = None, output_format = 'openfermion'):
+    def __init__(self, atom, basis, charge = 0, spin = 0, irrep = None, symmetry = True, verbose = False, show_lowest_eigenvalue = False, CAS = None, quick_CAS=False, natural_orbitals = False, active_mo = None, bravyi_kitaev = False, output_format = 'openfermion'):
         self.atom = atom
         self.basis = basis
         self.charge = charge
@@ -26,6 +26,8 @@ class Encoding():
         self.quick_CAS = quick_CAS
         self.natural_orbitals = natural_orbitals
         self.active_mo = active_mo
+        self.bravyi_kitaev = bool(bravyi_kitaev)
+        self._bk_tableau_cache = {}
         output_format = output_format.lower().replace('_', '').replace(' ', '')     
         self.output_format = output_format
 
@@ -81,6 +83,25 @@ class Encoding():
             self.tableau_signs = [1] * (2*n)
 
         self.get_CAS_encoding()     
+
+    def _get_bk_tableau(self, n_qubits):
+        n_qubits = int(n_qubits)
+        if n_qubits < 0:
+            raise ValueError("n_qubits must be non-negative")
+        if n_qubits not in self._bk_tableau_cache:
+            T = make_BK_T(n_qubits).astype(int) % 2
+            T_inv = gf2_inv(T).astype(int) % 2
+            M_ZZ = (T_inv.T) % 2
+            M = np.block(
+                [
+                    [M_ZZ, np.zeros((n_qubits, n_qubits), dtype=int)],
+                    [np.zeros((n_qubits, n_qubits), dtype=int), T],
+                ]
+            )
+            tableau = [list(1 - 2 * x) for x in M]
+            tableau_signs = [1] * (2 * n_qubits)
+            self._bk_tableau_cache[n_qubits] = (tableau, tableau_signs)
+        return self._bk_tableau_cache[n_qubits]
 
     def _repr_html_(self):
         if self.verbose == True:
@@ -208,6 +229,11 @@ class Encoding():
         if type(operator) == QubitOperator:
             operator = apply_Clifford_tableau(operator, self.tableau, self.tableau_signs)
             operator = simplify_QubitOperator(project_operator(operator, self.target_qubits))
+            if self.bravyi_kitaev:
+                n_qubits = self.nspinorbital - len(self.target_qubits)
+                bk_tableau, bk_tableau_signs = self._get_bk_tableau(n_qubits)
+                operator = apply_Clifford_tableau(operator, bk_tableau, bk_tableau_signs)
+                operator = simplify_QubitOperator(operator)
             if self.output_format == 'openfermion':
                 return operator
             elif self.output_format == 'qiskit':
@@ -350,6 +376,14 @@ class Encoding():
         for qubit in target_qubits:
             l = len(string_c)
             string_c = string_c[:l - qubit - 1] + string_c[l - qubit:]
+
+        # Optional final JW->BK affine map (with b=0) on the remaining qubits
+        if self.bravyi_kitaev:
+            n = len(string_c)
+            T = make_BK_T(n).astype(int) % 2
+            bits = np.array([int(x) for x in string_c[::-1]], dtype=int)  # qubit 0 is LSB
+            bk_bits = (T @ bits) % 2
+            string_c = ''.join(str(int(x)) for x in bk_bits[::-1])
 
         #Build Qiskit QuantumCircuit object to prepare the SAE HF state
         output = QuantumCircuit(len(string_c))
