@@ -317,14 +317,6 @@ def find_symmetry_generators(mol, irrep, orbital_labels, CAS_qubits=None, nelec_
     if CAS_qubits != None:
         symmetry_generators, signs, target_qubits = reduced_row_echelon_generators(symmetry_generators, signs, active_space_qubits)
 
-    symmetry_generators2 = symmetry_generators
-    for i in range(len(symmetry_generators2)):
-        for j in range(len(symmetry_generators2)):
-            if symmetry_generators2[i][j] == -1:
-                symmetry_generators2[i][j] == 1
-            elif symmetry_generators2[i][j] == 1:
-                symmetry_generators2[i][j] == 0
-          
     return symmetry_generator_labels, symmetry_generators_strings, target_qubits, symmetry_generators, signs, descriptions
 
 def make_clifford_tableau_old(symmetry_generators, signs, target_qubits):
@@ -1043,22 +1035,23 @@ def binary_row_echelon(A):
     return np.vstack([A[:1], np.hstack([A[1:,:1], B]) ])
 
 def binary_reduced_row_echelon(A):
-    
+
     A = binary_row_echelon(A)
 
     pivots = []
-    
+
     for i in range(len(A)):
         for j in range(len(A[0])):
             if A[i][j] == 1:
                 pivots.append(j)
                 break
-        
-    for i in range(len(A) - 1, -1, -1):
+
+    # Only back-substitute using pivot rows (dependent / zero rows have no pivot)
+    for i in range(len(pivots) - 1, -1, -1):
         for j in range(i - 1, -1, -1):
             if A[j][pivots[i]] == 1:
-                A[j] = (A[j] - A[i])%2
-    
+                A[j] = (A[j] - A[i]) % 2
+
     return A.tolist(), pivots
 
 def find_ground_state_irrep(orbital_labels, mo_occ, character_table, irrep_labels):

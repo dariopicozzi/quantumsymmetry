@@ -91,11 +91,12 @@ class Encoding():
         if n_qubits not in self._bk_tableau_cache:
             T = make_BK_T(n_qubits).astype(int) % 2
             T_inv = gf2_inv(T).astype(int) % 2
-            M_ZZ = (T_inv.T) % 2
+            M_ZZ = T_inv % 2
+            M_XX = T.T % 2
             M = np.block(
                 [
                     [M_ZZ, np.zeros((n_qubits, n_qubits), dtype=int)],
-                    [np.zeros((n_qubits, n_qubits), dtype=int), T],
+                    [np.zeros((n_qubits, n_qubits), dtype=int), M_XX],
                 ]
             )
             tableau = [list(1 - 2 * x) for x in M]
@@ -377,7 +378,9 @@ class Encoding():
             l = len(string_c)
             string_c = string_c[:l - qubit - 1] + string_c[l - qubit:]
 
-        # Optional final JW->BK affine map (with b=0) on the remaining qubits
+        # Optional final JW->BK affine map (with b=0) on the remaining qubits.
+        # The BK Clifford maps |f> → |Tf>, so the HF bitstring transforms as
+        # b = T @ f.
         if self.bravyi_kitaev:
             n = len(string_c)
             T = make_BK_T(n).astype(int) % 2
@@ -408,3 +411,251 @@ def reduced_hamiltonian(atom, basis, charge = 0, spin = 0, irrep = None, verbose
 def make_encoding(atom, basis, charge = 0, spin = 0, irrep = None, CAS = None, natural_orbitals = False, active_mo = None):
     encoding = Encoding(atom = atom, basis = basis, charge = charge, spin = spin, irrep = irrep, CAS = CAS, natural_orbitals = natural_orbitals, active_mo = active_mo)
     return (encoding.tableau, encoding.tableau_signs, encoding.target_qubits)
+
+
+class PeriodicEncoding():
+    """Symmetry-adapted encoding for periodic systems (crystals).
+
+    Two construction paths are supported:
+
+    1. **From PySCF** (atom + lattice vectors + k-mesh).  The supercell
+       Hamiltonian is built via the Strategy A pipeline in
+       :mod:`quantumsymmetry.periodic`, the supercell point group is
+       detected, and the maximal Boolean Z2^k subgroup is extracted
+       automatically.
+
+    2. **BYO Hamiltonian.**  The caller supplies a pre-built
+       :class:`openfermion.FermionOperator` together with +/-1 generator
+       arrays.  Used by the model-Hamiltonian benchmarks (Hubbard,
+       two-band).
+    """
+
+    def __init__(self,
+                 # PySCF-driven path
+                 atom=None, a=None, basis=None, kpts=None, pseudo=None,
+                 charge=0, spin=0, df='auto', exxdiv='ewald',
+                 active_bands=None, symmetry=True, verbose=False,
+                 symm_energy_tol=5e-3, symm_purity_tol=0.95,
+                 active_mos=None, integral_backend='kpts',
+                 # BYO-Hamiltonian path
+                 fermion_hamiltonian=None, nspinorbital=None,
+                 nelectron_up=None, nelectron_down=None,
+                 symmetry_generators=None, signs=None,
+                 symmetry_generator_labels=None,
+                 # Common
+                 name='crystal', bravyi_kitaev=False,
+                 output_format='openfermion'):
+        self.name = name
+        self.bravyi_kitaev = bool(bravyi_kitaev)
+        self._bk_tableau_cache = {}
+        self.output_format = output_format.lower().replace('_', '').replace(' ', '')
+        self.molecule_name = name
+
+        if fermion_hamiltonian is None and atom is not None:
+            # ---- PySCF-driven path ----
+            if a is None:
+                raise ValueError(
+                    "PeriodicEncoding from atom requires lattice vectors `a` (3x3)"
+                )
+            if kpts is None:
+                raise ValueError(
+                    "PeriodicEncoding from atom requires `kpts=(n1, n2, n3)`"
+                )
+            from .periodic import build_periodic_inputs
+            pyscf_inputs = build_periodic_inputs(
+                atom=atom, a=a, basis=basis, kpts_mesh=kpts, pseudo=pseudo,
+                spin=spin, charge=charge, df=df, exxdiv=exxdiv,
+                active_bands=active_bands,
+                verbose=int(verbose) if verbose else 0,
+                name=name,
+                symmetry=bool(symmetry),
+                symm_energy_tol=symm_energy_tol,
+                symm_purity_tol=symm_purity_tol,
+                active_mos=active_mos,
+                integral_backend=integral_backend,
+            )
+            self._pyscf_periodic = pyscf_inputs
+            kw = {k: v for k, v in pyscf_inputs.items() if not k.startswith('_')}
+            self._setup(
+                fermion_hamiltonian=kw['fermion_hamiltonian'],
+                nspinorbital=kw['nspinorbital'],
+                nelectron_up=kw['nelectron_up'],
+                nelectron_down=kw['nelectron_down'],
+                symmetry_generators=kw['symmetry_generators'],
+                signs=kw['signs'],
+                symmetry_generator_labels=kw['symmetry_generator_labels'],
+            )
+        else:
+            # ---- BYO-Hamiltonian path ----
+            self._setup(
+                fermion_hamiltonian=fermion_hamiltonian,
+                nspinorbital=nspinorbital,
+                nelectron_up=nelectron_up,
+                nelectron_down=nelectron_down,
+                symmetry_generators=symmetry_generators,
+                signs=signs,
+                symmetry_generator_labels=symmetry_generator_labels,
+            )
+
+    def _setup(self, fermion_hamiltonian, nspinorbital, nelectron_up, nelectron_down,
+               symmetry_generators, signs, symmetry_generator_labels):
+        if fermion_hamiltonian is None:
+            raise ValueError("PeriodicEncoding requires a fermion_hamiltonian (openfermion.FermionOperator)")
+        if nspinorbital is None:
+            raise ValueError("PeriodicEncoding requires nspinorbital (int)")
+
+        self.fermion_hamiltonian = fermion_hamiltonian
+        self.jordan_wigner_hamiltonian = jordan_wigner(fermion_hamiltonian)
+
+        self.nspinorbital = int(nspinorbital)
+        self.nelectron_up = int(nelectron_up) if nelectron_up is not None else None
+        self.nelectron_down = int(nelectron_down) if nelectron_down is not None else None
+        if self.nelectron_up is not None and self.nelectron_down is not None:
+            self.nelectron = self.nelectron_up + self.nelectron_down
+            self.spin = self.nelectron_up - self.nelectron_down
+        else:
+            self.nelectron = None
+            self.spin = 0
+
+        if symmetry_generators is None or len(symmetry_generators) == 0:
+            # No symmetry: identity tableau
+            self.symmetry = False
+            self.symmetry_generator_labels = []
+            self.symmetry_generators_strings = []
+            self.target_qubits = []
+            self.symmetry_target_qubits = []
+            self.symmetry_generators = []
+            self.signs = []
+            self.descriptions = []
+            n = self.nspinorbital
+            self.tableau = [[-1 if i == j else 1 for j in range(2*n)] for i in range(2*n)]
+            self.tableau_signs = [1] * (2*n)
+            return
+
+        # Validate generators: each is an array of length nspinorbital with entries +/-1
+        gens = []
+        for g in symmetry_generators:
+            arr = np.asarray(g, dtype=int)
+            if arr.shape != (self.nspinorbital,):
+                raise ValueError(
+                    f"Each symmetry generator must have length {self.nspinorbital}; got {arr.shape}"
+                )
+            if not set(np.unique(arr).tolist()).issubset({-1, 1}):
+                raise ValueError("symmetry_generators entries must be +1 or -1 only")
+            gens.append(arr)
+
+        if signs is None:
+            signs_list = [1] * len(gens)
+        else:
+            signs_list = [int(s) for s in signs]
+            if not all(s in (-1, 1) for s in signs_list):
+                raise ValueError("signs entries must be +1 or -1 only")
+        if len(signs_list) != len(gens):
+            raise ValueError("signs must have the same length as symmetry_generators")
+
+        # Row-reduce over GF(2) to canonical pivots and target qubits
+        sg, sgn, tq = reduced_row_echelon_generators(gens, signs_list)
+        self.symmetry = True
+        self.symmetry_generators = sg
+        self.signs = sgn
+        self.target_qubits = list(tq)
+        self.symmetry_target_qubits = list(tq)
+
+        if symmetry_generator_labels is None:
+            self.symmetry_generator_labels = [f'g{i}' for i in range(len(sg))]
+        else:
+            labels = [str(x) for x in symmetry_generator_labels]
+            if len(labels) >= len(sg):
+                self.symmetry_generator_labels = labels[:len(sg)]
+            else:
+                self.symmetry_generator_labels = labels + [
+                    f'g{i}' for i in range(len(labels), len(sg))
+                ]
+        self.descriptions = [''] * len(sg)
+
+        # Human-readable Z-string representations
+        self.symmetry_generators_strings = []
+        for i, gen in enumerate(sg):
+            tail = ''
+            for j in range(self.nspinorbital):
+                if gen[j] == -1:
+                    tail = f'Z{j} ' + tail
+            prefix = '- ' if sgn[i] == -1 else '+ '
+            self.symmetry_generators_strings.append(prefix + tail)
+
+        self.tableau, self.tableau_signs = make_clifford_tableau(sg, sgn, self.target_qubits)
+
+    def _get_bk_tableau(self, n_qubits):
+        n_qubits = int(n_qubits)
+        if n_qubits < 0:
+            raise ValueError("n_qubits must be non-negative")
+        if n_qubits not in self._bk_tableau_cache:
+            T = make_BK_T(n_qubits).astype(int) % 2
+            T_inv = gf2_inv(T).astype(int) % 2
+            M_ZZ = T_inv % 2
+            M_XX = T.T % 2
+            M = np.block(
+                [
+                    [M_ZZ, np.zeros((n_qubits, n_qubits), dtype=int)],
+                    [np.zeros((n_qubits, n_qubits), dtype=int), M_XX],
+                ]
+            )
+            tableau = [list(1 - 2 * x) for x in M]
+            tableau_signs = [1] * (2 * n_qubits)
+            self._bk_tableau_cache[n_qubits] = (tableau, tableau_signs)
+        return self._bk_tableau_cache[n_qubits]
+
+    def apply(self, operator):
+        if type(operator) == dict:
+            for key in operator:
+                operator.update({key: self.apply(operator[key])})
+            return operator
+        if type(operator) == list:
+            output = []
+            for item in operator:
+                mapped = self.apply(item)
+                if type(mapped) == quantum_info.SparsePauliOp:
+                    try:
+                        if mapped.size == 0:
+                            continue
+                        if mapped.coeffs.size == 0:
+                            continue
+                        if np.all(mapped.coeffs == 0):
+                            continue
+                    except Exception:
+                        pass
+                output.append(mapped)
+            return output
+        if type(operator) == FermionOperator:
+            operator = jordan_wigner(operator)
+        if type(operator) == FermionicOp:
+            operator = InterleavedQubitMapper(JordanWignerMapper()).map(operator)
+        if type(operator) == quantum_info.SparsePauliOp:
+            operator = SparsePauliOp_to_QubitOperator(operator)
+        if type(operator) == QubitOperator:
+            operator = apply_Clifford_tableau(operator, self.tableau, self.tableau_signs)
+            operator = simplify_QubitOperator(project_operator(operator, self.target_qubits))
+            if self.bravyi_kitaev:
+                n_qubits = self.nspinorbital - len(self.target_qubits)
+                bk_tableau, bk_tableau_signs = self._get_bk_tableau(n_qubits)
+                operator = apply_Clifford_tableau(operator, bk_tableau, bk_tableau_signs)
+                operator = simplify_QubitOperator(operator)
+            if self.output_format == 'openfermion':
+                return operator
+            elif self.output_format == 'qiskit':
+                num_qubits = self.nspinorbital - len(self.target_qubits)
+                operator = QubitOperator_to_PauliSumOp(operator, num_qubits=num_qubits)
+            return operator
+        raise TypeError("Unsupported input type")
+
+    def hamiltonian(self):
+        return self.apply(self.jordan_wigner_hamiltonian)
+
+    def qiskit_mapper(self):
+        mapper = QubitMapper()
+        mapper.map = self.apply
+        return mapper
+
+    qiskit_mapper = property(qiskit_mapper)
+    hamiltonian = property(hamiltonian)
+
