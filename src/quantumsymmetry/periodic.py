@@ -269,6 +269,259 @@ def _build_interleaved_fermion_op(h1, eri, constant=0.0, tol=1e-14):
     return H
 
 
+def _z2_leakage_report(fermion_hamiltonian, symmetry_generators,
+                       symmetry_generator_labels=None):
+    """Measure FermionOperator terms that violate diagonal Z2 generators.
+
+    The periodic SAE generators are diagonal in occupation number.  A fermionic
+    monomial commutes with such a generator iff it contains an even number of
+    creation/annihilation operators on spin-orbitals where the generator has
+    eigenvalue -1.  Terms that fail this test are symmetry-forbidden; in exact
+    arithmetic their coefficients should vanish.
+    """
+    if symmetry_generators is None or len(symmetry_generators) == 0:
+        return {
+            "offending_terms": 0,
+            "offending_one_norm": 0.0,
+            "offending_max_abs_coeff": 0.0,
+            "per_generator": {},
+        }
+
+    labels = (
+        [str(x) for x in symmetry_generator_labels]
+        if symmetry_generator_labels is not None
+        else [f"g{i}" for i in range(len(symmetry_generators))]
+    )
+    if len(labels) < len(symmetry_generators):
+        labels = labels + [f"g{i}" for i in range(len(labels), len(symmetry_generators))]
+
+    per_generator = {
+        labels[i]: {"terms": 0, "one_norm": 0.0, "max_abs_coeff": 0.0}
+        for i in range(len(symmetry_generators))
+    }
+    offending_terms = 0
+    offending_one_norm = 0.0
+    offending_max = 0.0
+    offending_term_keys = set()
+
+    for term, coeff in fermion_hamiltonian.terms.items():
+        if term == ():
+            continue
+        bad = []
+        for label, gen in zip(labels, symmetry_generators):
+            parity = 0
+            for q, _action in term:
+                if int(gen[q]) == -1:
+                    parity ^= 1
+            if parity:
+                bad.append(label)
+        if not bad:
+            continue
+
+        coeff_abs = abs(complex(coeff))
+        offending_term_keys.add(term)
+        offending_one_norm += coeff_abs
+        offending_max = max(offending_max, coeff_abs)
+        for label in bad:
+            rec = per_generator[label]
+            rec["terms"] += 1
+            rec["one_norm"] += coeff_abs
+            rec["max_abs_coeff"] = max(rec["max_abs_coeff"], coeff_abs)
+
+    offending_terms = len(offending_term_keys)
+    return {
+        "offending_terms": int(offending_terms),
+        "offending_one_norm": float(offending_one_norm),
+        "offending_max_abs_coeff": float(offending_max),
+        "per_generator": per_generator,
+    }
+
+
+def _project_fermion_operator_to_z2_symmetry(fermion_hamiltonian,
+                                             symmetry_generators,
+                                             symmetry_generator_labels=None,
+                                             warn_tol=1e-10):
+    """Return the Z2-symmetrised FermionOperator and a leakage report.
+
+    This performs the group average over the diagonal Boolean symmetry group in
+    coefficient space: symmetry-forbidden monomials are removed, while all
+    commuting monomials are retained unchanged.  It is used to remove small
+    finite-precision leakage introduced by periodic integral construction before
+    the affine SAE projection is applied.
+    """
+    report = _z2_leakage_report(
+        fermion_hamiltonian, symmetry_generators, symmetry_generator_labels
+    )
+    if report["offending_terms"] == 0:
+        return fermion_hamiltonian, report
+
+    cleaned = FermionOperator()
+    cleaned_terms = {}
+    for term, coeff in fermion_hamiltonian.terms.items():
+        if term == ():
+            cleaned_terms[term] = coeff
+            continue
+        keep = True
+        for gen in symmetry_generators:
+            parity = 0
+            for q, _action in term:
+                if int(gen[q]) == -1:
+                    parity ^= 1
+            if parity:
+                keep = False
+                break
+        if keep:
+            cleaned_terms[term] = coeff
+    cleaned.terms = cleaned_terms
+
+    if report["offending_max_abs_coeff"] > warn_tol:
+        warnings.warn(
+            "Periodic Hamiltonian contained symmetry-forbidden numerical "
+            f"leakage before SAE projection: {report['offending_terms']} terms, "
+            f"1-norm={report['offending_one_norm']:.3e} Ha, "
+            f"max coefficient={report['offending_max_abs_coeff']:.3e} Ha. "
+            "The Hamiltonian was Z2-symmetrised using the selected physical "
+            "generators.",
+            RuntimeWarning,
+        )
+    return cleaned, report
+
+
+def _integral_z2_leakage_report(h1, eri, spatial_signs,
+                                symmetry_generator_labels=None,
+                                return_masks=False):
+    """Measure symmetry-forbidden active integral tensor elements.
+
+    ``spatial_signs[p, g]`` is the +/-1 eigenvalue of active spatial orbital
+    ``p`` under diagonal Z2 generator ``g``.  In exact arithmetic,
+    ``h1[p,q]`` is nonzero only if ``s_p s_q = +1`` for every generator, and
+    ``eri[p,q,r,s]`` only if ``s_p s_q s_r s_s = +1``.
+
+    The top-level ``terms`` and ``one_norm`` entries are reported in the
+    equivalent interleaved-spin FermionOperator convention used by
+    ``_build_interleaved_fermion_op``: each forbidden one-body tensor element
+    corresponds to two same-spin monomials, and each forbidden two-body tensor
+    element to aa/ab/bb monomials with total coefficient 1-norm ``2*|v|``.
+    """
+    h1 = np.asarray(h1)
+    eri = np.asarray(eri)
+    n_orb = h1.shape[0]
+    if spatial_signs is None:
+        spatial_signs = np.zeros((n_orb, 0), dtype=int)
+    spatial_signs = np.asarray(spatial_signs, dtype=int)
+    if spatial_signs.size == 0:
+        spatial_signs = np.zeros((n_orb, 0), dtype=int)
+    if spatial_signs.ndim != 2 or spatial_signs.shape[0] != n_orb:
+        raise ValueError(
+            "spatial_signs must have shape (n_active_orbitals, n_generators); "
+            f"got {spatial_signs.shape} for {n_orb} active orbitals."
+        )
+
+    n_gen = spatial_signs.shape[1]
+    labels = (
+        [str(x) for x in symmetry_generator_labels]
+        if symmetry_generator_labels is not None
+        else [f"g{i}" for i in range(n_gen)]
+    )
+    if len(labels) < n_gen:
+        labels = labels + [f"g{i}" for i in range(len(labels), n_gen)]
+
+    h1_bad_any = np.zeros(h1.shape, dtype=bool)
+    eri_bad_any = np.zeros(eri.shape, dtype=bool)
+    per_generator = {}
+
+    for g in range(n_gen):
+        s = spatial_signs[:, g]
+        h1_bad = (s[:, None] * s[None, :]) < 0
+        eri_bad = (
+            s[:, None, None, None]
+            * s[None, :, None, None]
+            * s[None, None, :, None]
+            * s[None, None, None, :]
+        ) < 0
+        h1_bad = h1_bad & (np.abs(h1) > 0.0)
+        eri_bad = eri_bad & (np.abs(eri) > 0.0)
+        h1_bad_any |= h1_bad
+        eri_bad_any |= eri_bad
+
+        h1_abs = np.abs(h1[h1_bad])
+        eri_abs = np.abs(eri[eri_bad])
+        h1_sum = float(np.sum(h1_abs))
+        eri_sum = float(np.sum(eri_abs))
+        h1_max = float(np.max(h1_abs)) if h1_abs.size else 0.0
+        eri_max = float(np.max(eri_abs)) if eri_abs.size else 0.0
+        h1_count = int(np.count_nonzero(h1_bad))
+        eri_count = int(np.count_nonzero(eri_bad))
+        per_generator[labels[g]] = {
+            "terms": int(2 * h1_count + 3 * eri_count),
+            "one_norm": float(2.0 * (h1_sum + eri_sum)),
+            "max_abs_coeff": float(max(h1_max, eri_max)),
+            "h1_elements": h1_count,
+            "eri_elements": eri_count,
+            "h1_one_norm": h1_sum,
+            "eri_one_norm": eri_sum,
+            "h1_max_abs_coeff": h1_max,
+            "eri_max_abs_coeff": eri_max,
+        }
+
+    h1_abs_any = np.abs(h1[h1_bad_any])
+    eri_abs_any = np.abs(eri[eri_bad_any])
+    h1_sum_any = float(np.sum(h1_abs_any))
+    eri_sum_any = float(np.sum(eri_abs_any))
+    h1_max_any = float(np.max(h1_abs_any)) if h1_abs_any.size else 0.0
+    eri_max_any = float(np.max(eri_abs_any)) if eri_abs_any.size else 0.0
+    h1_count_any = int(np.count_nonzero(h1_bad_any))
+    eri_count_any = int(np.count_nonzero(eri_bad_any))
+
+    report = {
+        "source": "active_integral_tensors",
+        "offending_terms": int(2 * h1_count_any + 3 * eri_count_any),
+        "offending_one_norm": float(2.0 * (h1_sum_any + eri_sum_any)),
+        "offending_max_abs_coeff": float(max(h1_max_any, eri_max_any)),
+        "offending_tensor_elements": int(h1_count_any + eri_count_any),
+        "offending_h1_elements": h1_count_any,
+        "offending_eri_elements": eri_count_any,
+        "offending_h1_one_norm": h1_sum_any,
+        "offending_eri_one_norm": eri_sum_any,
+        "offending_h1_max_abs_coeff": h1_max_any,
+        "offending_eri_max_abs_coeff": eri_max_any,
+        "per_generator": per_generator,
+    }
+    if return_masks:
+        return report, h1_bad_any, eri_bad_any
+    return report
+
+
+def _symmetrize_active_integral_tensors(h1, eri, spatial_signs,
+                                        symmetry_generator_labels=None,
+                                        warn_tol=1e-10):
+    """Project active integral tensors onto the selected diagonal Z2 algebra."""
+    report, h1_bad, eri_bad = _integral_z2_leakage_report(
+        h1, eri, spatial_signs, symmetry_generator_labels, return_masks=True
+    )
+    if report["offending_tensor_elements"] == 0:
+        return h1, eri, report
+
+    h1_clean = np.array(h1, copy=True)
+    eri_clean = np.array(eri, copy=True)
+    h1_clean[h1_bad] = 0.0
+    eri_clean[eri_bad] = 0.0
+
+    if report["offending_max_abs_coeff"] > warn_tol:
+        warnings.warn(
+            "Periodic active-space integral tensors contained "
+            f"symmetry-forbidden numerical leakage: "
+            f"{report['offending_tensor_elements']} tensor elements "
+            f"({report['offending_terms']} equivalent fermionic terms), "
+            f"1-norm={report['offending_one_norm']:.3e} Ha, "
+            f"max coefficient={report['offending_max_abs_coeff']:.3e} Ha. "
+            "The tensors were Z2-symmetrised using the selected physical "
+            "generators before FermionOperator construction.",
+            RuntimeWarning,
+        )
+    return h1_clean, eri_clean, report
+
+
 def _supercell_mo_eri(mf_sc, mo_coeff):
     """Return MO-basis ERI for the supplied MO block, transforming
     directly via the FFTDF ``ao2mo`` path (avoids materialising the full
@@ -1146,7 +1399,11 @@ def _fermion_hamiltonian_in_mo_basis(mf_sc, mo_coeff, kmf=None):
 
 
 def _active_space_fermion_hamiltonian(mf_sc, mo_coeff, active_indices_0,
-                                       kmf=None, integral_backend='kpts'):
+                                       kmf=None, integral_backend='kpts',
+                                       symmetry_signs=None,
+                                       symmetry_labels=None,
+                                       enforce_symmetry=True,
+                                       symmetry_leak_tol=1e-10):
     """Build the active-space FermionOperator using periodic ERIs and the
     standard frozen-core mean-field correction to ``h1``.
 
@@ -1172,6 +1429,12 @@ def _active_space_fermion_hamiltonian(mf_sc, mo_coeff, active_indices_0,
     active_indices_0 : list[int]
         Zero-indexed positions (into ``mo_coeff`` columns) of the
         active MOs.
+    symmetry_signs : ndarray | None
+        Optional ``(n_active_orbitals, n_generators)`` +/-1 spatial symmetry
+        labels for the active orbitals.  If supplied, the raw active integral
+        tensors are audited and, when ``enforce_symmetry`` is True, projected
+        onto the selected Z2 symmetry algebra before the FermionOperator is
+        built.
 
     Returns
     -------
@@ -1193,6 +1456,9 @@ def _active_space_fermion_hamiltonian(mf_sc, mo_coeff, active_indices_0,
     active_sorted : list[int]
         ``active_indices_0`` sorted ascending (the order matching the
         spinorbital indexing of ``H_active``).
+    leakage_report : dict
+        Audit of symmetry-forbidden active tensor elements before optional
+        tensor symmetrisation.
     """
     from pyscf import ao2mo
 
@@ -1379,9 +1645,24 @@ def _active_space_fermion_hamiltonian(mf_sc, mo_coeff, active_indices_0,
         e_core = 0.0
     e_core += float(mf_sc.energy_nuc())
 
+    if symmetry_signs is not None:
+        if enforce_symmetry:
+            h1_act, eri_act, leakage_report = _symmetrize_active_integral_tensors(
+                h1_act, eri_act, symmetry_signs, symmetry_labels,
+                warn_tol=symmetry_leak_tol,
+            )
+        else:
+            leakage_report = _integral_z2_leakage_report(
+                h1_act, eri_act, symmetry_signs, symmetry_labels
+            )
+    else:
+        leakage_report = _integral_z2_leakage_report(
+            h1_act, eri_act, None, None
+        )
+
     # ---- Build active-space FermionOperator (interleaved spin) ----
     H = _build_interleaved_fermion_op(h1_act, eri_act, e_core)
-    return H, n_act, nelec_in_active, e_core, active_sorted
+    return H, n_act, nelec_in_active, e_core, active_sorted, leakage_report
 
 
 def _active_space_number_penalty(n_act, n_up_target, n_dn_target, strength=2.0):
@@ -1412,16 +1693,13 @@ def _active_space_number_penalty(n_act, n_up_target, n_dn_target, strength=2.0):
 
 
 # ---------------------------------------------------------------------------
-# Space-group-aware extra Z2 generators
+# Crystal-space-group Z2 generators for the periodic planner
 # ---------------------------------------------------------------------------
 #
-# The ``mol_sc``-based PG detection only sees operations that map the *finite*
-# 16-atom (etc.) supercell cluster back to itself with a fixed origin.  Many
-# space-group operations of the infinite crystal map atoms only modulo a
-# supercell lattice vector, so they're invisible to the molecular detector.
-# These helpers enumerate the full primitive space group via PySCF's
-# ``cell.lattice_symmetry``, lift each involution to a supercell-AO orthogonal
-# matrix, and add any new GF(2)-independent ones as extra Z2 generators.
+# Periodic tapering is built from the infinite crystal symmetry, not from the
+# origin-sensitive point group of a finite supercell cluster.  These helpers
+# enumerate the primitive-cell space group via PySCF's ``cell.lattice_symmetry``
+# and lift each usable involution to a supercell-AO orthogonal matrix.
 
 def _axis_label(R):
     """Return a short axis label for a Z2 rotation/reflection R (3x3 integer
@@ -1677,6 +1955,257 @@ def _gf2_rank(M):
     return r
 
 
+def _energy_blocks(mo_energy, energy_tol=5e-3):
+    """Return MO-index blocks grouped only by approximate energy."""
+    order = np.argsort(mo_energy)
+    blocks = []
+    cur = [int(order[0])]
+    for j in order[1:]:
+        j = int(j)
+        if abs(mo_energy[j] - mo_energy[cur[0]]) < energy_tol:
+            cur.append(j)
+        else:
+            blocks.append(cur)
+            cur = [j]
+    blocks.append(cur)
+    return blocks
+
+
+def _commutes(A, B, tol=1e-6):
+    return float(np.linalg.norm(A @ B - B @ A, ord='fro')) <= tol
+
+
+def _gf2_basis_indices(bit_vectors):
+    """Return indices selecting a row basis of the supplied GF(2) vectors."""
+    if not bit_vectors:
+        return []
+    bits = [list(map(int, v)) for v in bit_vectors]
+    rows = list(range(len(bits)))
+    chosen_rows = []
+    pivot_col = 0
+    n_col = len(bits[0])
+    while pivot_col < n_col and rows:
+        pivot_row = next((r for r in rows if bits[r][pivot_col] == 1), None)
+        if pivot_row is None:
+            pivot_col += 1
+            continue
+        chosen_rows.append(pivot_row)
+        for r in rows:
+            if r != pivot_row and bits[r][pivot_col] == 1:
+                bits[r] = [(a ^ b) for a, b in zip(bits[r], bits[pivot_row])]
+        rows.remove(pivot_row)
+        pivot_col += 1
+    return chosen_rows
+
+
+def _translation_basis_commuting_with_ops(T_ao_primitives, pg_ops, tol=1e-6):
+    """Return a GF(2) basis of half-translations commuting with ``pg_ops``."""
+    d = len(T_ao_primitives)
+    passing_bits = []
+    passing_ops = []
+    passing_combos = []
+    for code in range(1, 1 << d):
+        bits = tuple((code >> i) & 1 for i in range(d))
+        T = None
+        combo = []
+        for i, bit in enumerate(bits):
+            if bit:
+                T = T_ao_primitives[i] if T is None else T @ T_ao_primitives[i]
+                combo.append(i)
+        if all(_commutes(T, U, tol=tol) for _, U in pg_ops):
+            passing_bits.append(bits)
+            passing_ops.append(T)
+            passing_combos.append(tuple(combo))
+    basis = _gf2_basis_indices(passing_bits)
+    return [(passing_combos[i], passing_ops[i]) for i in basis]
+
+
+def _iter_commuting_pg_subsets(extra_ops, max_rank=3, tol=1e-6):
+    """Yield all pairwise-commuting crystal-PG subsets up to rank 3."""
+    from itertools import combinations
+
+    yield ()
+    for k in range(1, min(max_rank, len(extra_ops)) + 1):
+        for subset in combinations(extra_ops, k):
+            if all(_commutes(A[1], B[1], tol=tol)
+                   for ia, A in enumerate(subset)
+                   for B in subset[ia + 1:]):
+                yield subset
+
+
+def _spatial_signs_to_spinorbital_generators(sign_matrix, active_indices_0):
+    """Lift per-spatial-MO +/-1 signs to interleaved spin-orbital generators."""
+    if sign_matrix is None or sign_matrix.size == 0:
+        return []
+    # Normalise to a list so tuples are treated as row selections rather than
+    # NumPy multi-axis indexing tuples.
+    active_signs = np.asarray(sign_matrix)[list(active_indices_0)]
+    gens = []
+    for k in range(active_signs.shape[1]):
+        vec = np.empty(2 * len(active_indices_0), dtype=int)
+        vec[0::2] = active_signs[:, k]
+        vec[1::2] = active_signs[:, k]
+        gens.append(vec)
+    return gens
+
+
+def _active_independent_spatial_indices(sign_matrix, active_indices_0):
+    """Indices of spatial columns independent after adding spin parities."""
+    n_so = 2 * len(active_indices_0)
+    spin_gens, _ = spin_parity_generators(n_so)
+    existing = np.asarray(
+        [(np.asarray(g) < 0).astype(np.uint8) for g in spin_gens],
+        dtype=np.uint8,
+    )
+    rank = _gf2_rank(existing)
+    chosen = []
+    for k, gen in enumerate(_spatial_signs_to_spinorbital_generators(
+            sign_matrix, active_indices_0)):
+        row = (np.asarray(gen) < 0).astype(np.uint8)
+        stacked = np.vstack([existing, row[None, :]])
+        new_rank = _gf2_rank(stacked)
+        if new_rank > rank:
+            chosen.append(k)
+            existing = stacked
+            rank = new_rank
+    return chosen
+
+
+def _score_periodic_signs(sign_matrix, active_indices_0):
+    """GF(2) rank of spatial signs plus the two fixed spin parities."""
+    return 2 + len(_active_independent_spatial_indices(
+        sign_matrix, active_indices_0
+    ))
+
+
+def _axis_aligned_label_score(labels):
+    preferred = {
+        'i', 'C2[+00]', 'C2[0+0]', 'C2[00+]',
+        'σ[+00]', 'σ[0+0]', 'σ[00+]',
+    }
+    return sum(lbl in preferred for lbl in labels)
+
+
+def _select_max_rank_periodic_plan(mo_coeff, mo_energy, S, extra_ops,
+                                   T_ao_primitives, even_axes,
+                                   active_indices_0, energy_tol=5e-3,
+                                   commute_tol=1e-6):
+    """Select the maximal commuting periodic Z2 plan on the active space.
+
+    Algorithm
+    ---------
+    1. Enumerate every commuting crystal point-group subset up to Boolean rank
+       three (the maximum point-group rank in 3D).
+    2. For each PG subset, construct the full GF(2) basis of half-translations
+       that commute with it.
+    3. Simultaneously diagonalise that candidate operator set within the
+       energy-degenerate MO blocks.
+    4. Score the resulting active-space generator matrix together with the two
+       spin parities and keep the candidate with the largest GF(2) rank.
+
+    The returned spatial operators are already reduced to a full-space
+    independent basis by ``_refine_blocks_with_extra_ops``; active-space
+    dependencies are removed later when the final generator list is emitted.
+    """
+    best = None
+    blocks = _energy_blocks(mo_energy, energy_tol)
+
+    for pg_subset in _iter_commuting_pg_subsets(extra_ops, tol=commute_tol):
+        trans_basis = _translation_basis_commuting_with_ops(
+            T_ao_primitives, pg_subset, tol=commute_tol
+        )
+        candidate_ops = [
+            (f"T_({'+'.join(f'a{even_axes[i]}' for i in combo)})/2", T)
+            for combo, T in trans_basis
+        ] + list(pg_subset)
+
+        coeff, _refined_blocks, accepted = _refine_blocks_with_extra_ops(
+            mo_coeff, S, candidate_ops, blocks,
+        )
+        labels = [lbl for lbl, _ in accepted]
+        sign_matrix = (
+            np.stack([sv for _, sv in accepted], axis=1)
+            if accepted else np.zeros((mo_coeff.shape[1], 0), dtype=int)
+        )
+        total_rank = _score_periodic_signs(sign_matrix, active_indices_0)
+        active_spatial_rank = total_rank - 2
+        active_cols = _active_independent_spatial_indices(
+            sign_matrix, active_indices_0
+        )
+        active_labels = [labels[k] for k in active_cols]
+        n_trans = sum(lbl.startswith('T_(') for lbl in active_labels)
+        # Tie-break only after the physically relevant total rank:
+        #   1. more independent spatial generators on the active space,
+        #   2. more explicit periodic translations,
+        #   3. simpler axis-aligned labels,
+        #   4. deterministic lexical order.
+        key = (
+            total_rank,
+            active_spatial_rank,
+            n_trans,
+            _axis_aligned_label_score(active_labels),
+            tuple(sorted(active_labels)),
+        )
+        if best is None or key > best['key']:
+            best = dict(
+                key=key,
+                mo_coeff=coeff,
+                labels=labels,
+                active_labels=active_labels,
+                sign_matrix=sign_matrix,
+                pg_labels=[lbl for lbl, _ in pg_subset],
+                translation_labels=[
+                    f"T_({'+'.join(f'a{even_axes[i]}' for i in combo)})/2"
+                    for combo, _ in trans_basis
+                ],
+                total_rank=total_rank,
+                spatial_rank=active_spatial_rank,
+            )
+
+    if best is None:
+        raise RuntimeError("No periodic symmetry plan could be constructed.")
+    return best
+
+
+def _append_spatial_sign_generators(gens, signs, labels, sign_matrix,
+                                    op_labels, active_indices_0, n_so,
+                                    mo_occ=None):
+    """Append GF(2)-independent spatial +/-1 generators to an existing set."""
+    if sign_matrix is None or len(op_labels) == 0:
+        return
+    active_signs = sign_matrix[active_indices_0]
+    existing_b = (
+        np.array([(np.asarray(g) < 0).astype(np.uint8) for g in gens],
+                 dtype=np.uint8)
+        if gens else np.zeros((0, n_so), dtype=np.uint8)
+    )
+    base_rank = _gf2_rank(existing_b) if existing_b.size else 0
+    mo_occ_active = None if mo_occ is None else np.asarray(mo_occ)[active_indices_0]
+    for k_op, lbl in enumerate(op_labels):
+        sign_per_mo = active_signs[:, k_op]
+        gen_vec = np.empty(n_so, dtype=int)
+        for p, s_p in enumerate(sign_per_mo):
+            gen_vec[2 * p] = int(s_p)
+            gen_vec[2 * p + 1] = int(s_p)
+        new_b = (gen_vec < 0).astype(np.uint8)
+        stacked = (np.vstack([existing_b, new_b[None, :]])
+                   if existing_b.size else new_b[None, :])
+        if _gf2_rank(stacked) == base_rank:
+            continue
+        gens.append(gen_vec)
+        if mo_occ_active is not None:
+            n_antisym = int(sum(
+                round(float(mo_occ_active[p]))
+                for p in range(len(sign_per_mo)) if sign_per_mo[p] == -1
+            ))
+            signs.append((-1) ** n_antisym)
+        else:
+            signs.append(1)
+        labels.append(lbl)
+        existing_b = stacked
+        base_rank += 1
+
+
 def _generators_from_supercell_symmetry(mol_sc, label_orb_symm, n_spinorbital,
                                          nelectron_up, nelectron_down):
     """Run the molecular `find_symmetry_generators` on the symmetry-adapted
@@ -1726,7 +2255,9 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
                           active_bands=None, verbose=0, name='crystal',
                           symmetry=True,
                           symm_energy_tol=5e-3, symm_purity_tol=0.95,
-                          active_mos=None, integral_backend='kpts'):
+                          active_mos=None, integral_backend='kpts',
+                          enforce_symmetry=True,
+                          symmetry_leak_tol=1e-10):
     """End-to-end builder for the periodic-from-PySCF path.
 
     Returns a dict suitable for feeding into ``Encoding(periodic=True, **out)``.
@@ -1743,16 +2274,26 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
         unoccupied MOs outside the window are dropped.  Symmetry detection
         runs on the active-MO subset only.
     symmetry : bool
-        If True (default) the supercell-as-molecule point group is
-        detected and used to build the maximal Boolean Z2^k subgroup
-        (Strategy A in the design notes).  Half-translations along
-        even-mesh axes that map to supercell point-group elements
-        (typically inversion through atom midpoints) are picked up
-        automatically.
+        If True (default), enumerate the primitive-cell crystal-space-group
+        involutions and the available half-supercell translations, then select
+        the commuting spatial subset that maximises the active-space GF(2)
+        rank after the two spin-parity generators are included.  The finite
+        supercell-as-molecule point group is retained only as a diagnostic.
 
         If False, only spin parities and the explicit half-translation
         generators are used; the FermionOperator is built in the
         original (band, k_index, sigma) Bloch basis.
+    enforce_symmetry : bool
+        If True (default), explicitly project the numerical active-space
+        integral tensors onto the selected diagonal Z2 symmetry algebra before
+        building the FermionOperator.  This removes finite-precision
+        symmetry-forbidden tensor elements introduced by the periodic integral
+        backend before the SAE Clifford projection is applied.  Full-space
+        builds without ``active_mos`` use the equivalent FermionOperator-level
+        projection as a fallback.
+    symmetry_leak_tol : float
+        Warn when the largest removed symmetry-forbidden coefficient exceeds
+        this value in Hartree.
     """
     import time as _time
     _t0 = _time.time()
@@ -1801,12 +2342,13 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
             _kmf=kmf, _mf_sc=mf_sc, _n_k=n_k, _n_bands=n_bands,
         )
 
-    # ------------- Strategy A: molecular pipeline on supercell -------------
-    _stage('build supercell Mol (symmetry detection)')
+    # The finite supercell-as-molecule point group is kept for diagnostics and
+    # backwards-compatible introspection only.  Periodic generator selection
+    # below is performed from the primitive-cell crystal space group.
+    _stage('build supercell Mol (diagnostic only)')
     mol_sc = _build_supercell_mol(mf_sc.cell, symmetry=True)
     _stage(f'mol_sc PG = {mol_sc.groupname}')
 
-    # Symmetry-adapt the k2gamma MOs so each one lies in a single irrep of mol_sc
     S = mf_sc.get_ovlp()
     if np.iscomplexobj(S):
         S = S.real
@@ -1814,18 +2356,15 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
     if mo_coeff.dtype != float:
         mo_coeff = mo_coeff.real
     mo_energy = np.asarray(mf_sc.mo_energy).real
+    requested_active_indices_0 = (
+        list(range(mo_coeff.shape[1]))
+        if active_mos is None
+        else sorted(int(i) - 1 for i in active_mos)
+    )
 
-    # Build half-supercell-translation generators in MO basis. For an
-    # axis with even mesh size n_i, the Z_2 generator is the translation
-    # by half the supercell period, T_{(n_i/2) a_i}, where a_i is the
-    # primitive lattice vector along that axis.  This translation has
-    # order 2 in the supercell periodic boundary conditions and acts as
-    # +/-1 on every MO that descended from KRHF at a definite k-point.
-    # Only those F2-combinations T_v = prod_i (T_{(n_i/2) a_i})^{v_i} that
-    # COMMUTE with every PG irrep projector can coexist with the molecular
-    # point-group adaptation.  On orthorhombic Bravais (cubic, tetragonal,
-    # ...) every primitive passes; on FCC/BCC/diamond only certain
-    # combinations (e.g. the body-diagonal glide) survive.
+    # Primitive half-supercell translations available on even mesh axes.  The
+    # planner below will form whatever GF(2) combinations are compatible with
+    # each candidate crystal-PG subgroup.
     even_axes = [i for i, m in enumerate(kpts_mesh)
                  if int(m) % 2 == 0 and int(m) >= 2]
     T_ao_primitives = []
@@ -1846,80 +2385,43 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
         )
         T_ao_primitives.append(_ao_translation_matrix(mf_sc.cell, atom_perm))
 
-    if T_ao_primitives:
-        _stage(f'building {len(T_ao_primitives)} primitive AO translations + irrep projectors')
-        irrep_projs = _build_irrep_projectors(mol_sc, S)
-        _stage(f'filtering PG-invariant translations among 2^{len(T_ao_primitives)}-1 combos')
-        T_ao_list, T_label_combos = _filter_pg_invariant_translations(
-            T_ao_primitives, irrep_projs
-        )
-        _stage(f'  -> {len(T_ao_list)} surviving combo(s): {T_label_combos}')
-    else:
-        T_ao_list, T_label_combos = [], []
-
-    if T_ao_list:
-        _stage('diagonalise translations in energy-degenerate blocks')
-        mo_coeff, k_signs_per_mo = _diagonalise_translations_in_energy_blocks(
-            mo_coeff, mo_energy, S, T_ao_list,
-            energy_tol=symm_energy_tol,
-        )
-    else:
-        k_signs_per_mo = None
-
-    _stage('symmetry-adapt MOs')
-    new_mo_coeff, label_orb_symm = _symmetry_adapt_mos(
-        mol_sc, mo_coeff, mo_energy, S,
-        energy_tol=symm_energy_tol, irrep_purity_tol=symm_purity_tol,
-        k_signs_per_mo=k_signs_per_mo,
-    )
-
-    # ---------- Extra space-group generators (beyond mol_sc PG) ----------
-    # Enumerate primitive-cell space-group involutions that close on the
-    # supercell, lift to supercell-AO matrices via PySCF Wigner-D, and
-    # accept those that are GF(2)-independent of the (energy, irrep,
-    # k-sign) block partition already established.
-    extra_signs_per_mo = None
-    extra_op_labels = []
+    # Enumerate the true crystal-space-group involutions.  These, together with
+    # the half-translations, are the sole spatial candidates used by the
+    # periodic planner.
     try:
-        _stage('enumerate extra space-group involutions')
+        _stage('enumerate crystal space-group involutions')
         extra_ops = _extra_supercell_pg_ops(cell, mf_sc, S)
         _stage(f'  -> {len(extra_ops)} candidate involution(s) close on supercell')
     except Exception as _e:
         extra_ops = []
-        _stage(f'  space-group enumeration skipped: {_e!r}')
+        _stage(f'  crystal space-group enumeration skipped: {_e!r}')
 
-    if extra_ops:
-        # Build current MO block partition: group by (energy, irrep, k-sign)
-        n_mo_total = new_mo_coeff.shape[1]
-        order = np.argsort(mo_energy)
-        def _mo_key(j):
-            k = (round(float(mo_energy[j]) / max(symm_energy_tol, 1e-9)),
-                 label_orb_symm[j])
-            if k_signs_per_mo is not None:
-                k = k + (tuple(int(x) for x in k_signs_per_mo[j]),)
-            return k
-        cur_blocks = []
-        cur_key = None
-        for j in order:
-            j = int(j)
-            kj = _mo_key(j)
-            if kj != cur_key:
-                cur_blocks.append([j])
-                cur_key = kj
-            else:
-                cur_blocks[-1].append(j)
-        _stage(f'  block partition has {len(cur_blocks)} blocks (n_mo={n_mo_total})')
-        new_mo_coeff, _refined_blocks, accepted = _refine_blocks_with_extra_ops(
-            new_mo_coeff, S, extra_ops, cur_blocks,
-        )
-        if accepted:
-            extra_op_labels = [lbl for lbl, _ in accepted]
-            extra_signs_per_mo = np.stack(
-                [sv for _, sv in accepted], axis=1
-            )  # (n_mo, n_extra)
-            _stage(f'  -> {len(accepted)} extra independent generator(s): {extra_op_labels}')
-        else:
-            _stage('  -> 0 extra independent generators (all dependent on existing)')
+    _stage('select maximal periodic symmetry plan')
+    plan = _select_max_rank_periodic_plan(
+        mo_coeff, mo_energy, S, extra_ops, T_ao_primitives, even_axes,
+        requested_active_indices_0, energy_tol=symm_energy_tol,
+    )
+    new_mo_coeff = plan['mo_coeff']
+    spatial_op_labels = plan['labels']
+    spatial_signs_per_mo = plan['sign_matrix']
+    active_spatial_cols = _active_independent_spatial_indices(
+        spatial_signs_per_mo, requested_active_indices_0
+    )
+    active_spatial_labels = [spatial_op_labels[k] for k in active_spatial_cols]
+    active_spatial_signs = (
+        spatial_signs_per_mo[np.ix_(requested_active_indices_0, active_spatial_cols)]
+        if active_spatial_cols
+        else np.zeros((len(requested_active_indices_0), 0), dtype=int)
+    )
+    label_orb_symm = [
+        str(tuple(int(spatial_signs_per_mo[j, k])
+                  for k in range(spatial_signs_per_mo.shape[1])))
+        for j in range(new_mo_coeff.shape[1])
+    ]
+    _stage(
+        '  -> rank %d = 2 spin + %d spatial; active basis %s'
+        % (plan['total_rank'], plan['spatial_rank'], plan['active_labels'])
+    )
 
     if active_mos is None:
         # Full-space path: build the FermionOperator in the symmetry-adapted
@@ -1932,15 +2434,20 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
         nelec_up_eff = nelec_up
         nelec_dn_eff = nelec_dn
         e_core = 0.0
-        active_indices_0 = list(range(n_mo))
+        active_indices_0 = requested_active_indices_0
+        leakage_report = None
     else:
         # Active-space path: rebuild integrals on the active MO block only.
         # Carry frozen-core mean-field correction into h1 and into E_core.
         _stage(f'active-space fermion Hamiltonian build (n_act={len(active_mos)})')
-        active_indices_0 = sorted(int(i) - 1 for i in active_mos)
-        H, n_mo, nelec_in_active, e_core, _act_sorted = (
+        active_indices_0 = requested_active_indices_0
+        H, n_mo, nelec_in_active, e_core, _act_sorted, leakage_report = (
             _active_space_fermion_hamiltonian(mf_sc, new_mo_coeff, active_indices_0,
-                                              kmf=kmf, integral_backend=integral_backend)
+                                              kmf=kmf, integral_backend=integral_backend,
+                                              symmetry_signs=active_spatial_signs,
+                                              symmetry_labels=active_spatial_labels,
+                                              enforce_symmetry=enforce_symmetry,
+                                              symmetry_leak_tol=symmetry_leak_tol)
         )
         n_so = 2 * n_mo
         # Active-window electron count and (Sz, parity).
@@ -1959,85 +2466,38 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
         )
         active_label_orb_symm = [label_orb_symm[i] for i in active_indices_0]
 
-    # Detect Boolean Z2^k generators via the molecular pipeline
-    _stage('detect supercell-PG generators')
-    gens, signs, labels, irrep = _generators_from_supercell_symmetry(
-        mol_sc, active_label_orb_symm, n_so, nelec_up_eff, nelec_dn_eff
+    _stage('build maximal active-space generator set')
+    gens, _spin_labels = spin_parity_generators(n_so)
+    labels = ['P↑', 'P↓']
+    signs = [
+        1 if nelec_up_eff % 2 == 0 else -1,
+        1 if nelec_dn_eff % 2 == 0 else -1,
+    ]
+    _append_spatial_sign_generators(
+        gens, signs, labels, spatial_signs_per_mo, spatial_op_labels,
+        active_indices_0, n_so, mo_occ=np.asarray(mf_sc.mo_occ),
     )
-    _stage('done')
-
-    # Append half-translation generators built from the k-signs of each
-    # MO under each surviving (PG-invariant) F2-combination of primitive
-    # translations.  Each generator is a +/-1 vector of length n_so with
-    # the same +/-1 pattern on alpha (even) and beta (odd) qubits.
-    #
-    # GF(2) independence check: a half-translation that coincides with a
-    # supercell point-group element (e.g. inversion in a centrosymmetric
-    # crystal) would already be captured by _generators_from_supercell_symmetry.
-    # We skip any generator whose binary support lies in the span of the
-    # generators already collected, to avoid adding a linearly dependent
-    # (and potentially sign-conflicting) vector.
-    if k_signs_per_mo is not None:
-        active_k_signs = k_signs_per_mo[active_indices_0]  # (n_act, n_combos)
-        mo_occ_active = np.asarray(mf_sc.mo_occ)[active_indices_0]
-        existing_b = (
-            np.array([(np.asarray(g) < 0).astype(np.uint8) for g in gens],
-                     dtype=np.uint8)
-            if gens else np.zeros((0, n_so), dtype=np.uint8)
+    irrep = None
+    if len(labels) != plan['total_rank']:
+        raise RuntimeError(
+            "Periodic symmetry planner/emitter rank mismatch: "
+            f"planned {plan['total_rank']} generators but emitted {len(labels)}."
         )
-        base_rank = _gf2_rank(existing_b) if existing_b.size else 0
-        for combo_local, combo in enumerate(T_label_combos):
-            sign_per_mo = active_k_signs[:, combo_local]
-            gen_vec = np.empty(n_so, dtype=int)
-            for p, s_p in enumerate(sign_per_mo):
-                gen_vec[2 * p] = int(s_p)
-                gen_vec[2 * p + 1] = int(s_p)
-            new_b = (gen_vec < 0).astype(np.uint8)
-            stacked = (np.vstack([existing_b, new_b[None, :]])
-                       if existing_b.size else new_b[None, :])
-            if _gf2_rank(stacked) == base_rank:
-                continue  # GF(2)-dependent on existing generators
-            # Sign: (-1)^{n_electrons_in_antisymmetric_k-sector} at the HF
-            # reference.  For KRHF, mo_occ values are 0 or 2 (closed-shell),
-            # so n_antisym is always even and the sign is always +1.  The
-            # explicit computation is kept for correctness with future
-            # open-shell extensions (KROHF etc.).
-            n_antisym = int(sum(
-                round(float(mo_occ_active[p]))
-                for p in range(len(sign_per_mo)) if sign_per_mo[p] == -1
-            ))
-            signs.append((-1) ** n_antisym)
-            gens.append(gen_vec)
-            ax_str = '+'.join(f'a{even_axes[i]}' for i in combo)
-            labels.append(f'T_({ax_str})/2')
-            existing_b = stacked
-            base_rank += 1
+    _stage(f'  -> emitted {len(labels)} independent generator(s): {labels}')
 
-    # Extra space-group generators (must come AFTER the half-translation
-    # block so that their GF(2) independence is assessed against the
-    # full set of existing generators (parities + PG + half-translations).
-    if extra_signs_per_mo is not None:
-        active_extra = extra_signs_per_mo[active_indices_0]  # (n_act, n_extra)
-        # GF(2) basis from all currently-appended generators (full n_so each).
-        existing_b = np.array(
-            [(np.asarray(g) < 0).astype(int) for g in gens], dtype=np.uint8
-        ) % 2 if gens else np.zeros((0, n_so), dtype=np.uint8)
-        base_rank = _gf2_rank(existing_b) if existing_b.size else 0
-        for k_extra, lbl in enumerate(extra_op_labels):
-            sign_per_mo = active_extra[:, k_extra]
-            gen_vec = np.empty(n_so, dtype=int)
-            for p, s_p in enumerate(sign_per_mo):
-                gen_vec[2 * p] = int(s_p)
-                gen_vec[2 * p + 1] = int(s_p)
-            new_b = (gen_vec < 0).astype(np.uint8)
-            stacked = np.vstack([existing_b, new_b[None, :]]) if existing_b.size else new_b[None, :]
-            if _gf2_rank(stacked) == base_rank:
-                continue  # GF(2)-dependent on existing -> skip
-            gens.append(gen_vec)
-            signs.append(1)
-            labels.append(lbl)
-            existing_b = stacked
-            base_rank += 1
+    if active_mos is None and enforce_symmetry:
+        # Full-space builds currently assemble the FermionOperator before the
+        # active generator set exists, so they retain the older operator-level
+        # projection.  Active-space builds use tensor-level symmetrisation above.
+        H, leakage_report = _project_fermion_operator_to_z2_symmetry(
+            H, gens, labels, warn_tol=symmetry_leak_tol
+        )
+        post_leakage_report = _z2_leakage_report(H, gens, labels)
+    elif active_mos is None:
+        leakage_report = _z2_leakage_report(H, gens, labels)
+        post_leakage_report = leakage_report
+    else:
+        post_leakage_report = _z2_leakage_report(H, gens, labels)
 
     return dict(
         fermion_hamiltonian=H, nspinorbital=n_so,
@@ -2051,4 +2511,6 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
         _active_indices_0=active_indices_0,
         _e_core=e_core,
         _new_mo_coeff=new_mo_coeff,
+        _symmetry_leakage_report=leakage_report,
+        _post_symmetry_leakage_report=post_leakage_report,
     )

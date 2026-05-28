@@ -203,22 +203,24 @@ class Encoding():
             output = []
             for item in operator:
                 mapped = self.apply(item)
-                # Drop mapped zero operators to keep ansatz compact.
-                # This is especially important when a CAS/projected encoding makes
-                # many UCC excitations identically zero.
+                # Map zero operators to None so that the output list keeps the
+                # same length and ordering as the input. qiskit-nature's UCC
+                # contract expects mapper.map(list) to return a list aligned
+                # with excitation_list, with None for filtered/zero entries;
+                # otherwise zip(operators, excitation_list) in _filter_operators
+                # misaligns labels with their actual variational operators.
                 if type(mapped) == quantum_info.SparsePauliOp:
                     try:
-                        if mapped.size == 0:
-                            continue
-                        # Only drop *exactly* zero operators.
-                        # Using allclose() can incorrectly remove small-but-nonzero terms
-                        # and change the ansatz/energy.
-                        if mapped.coeffs.size == 0:
-                            continue
-                        if np.all(mapped.coeffs == 0):
-                            continue
+                        is_zero = (
+                            mapped.size == 0
+                            or mapped.coeffs.size == 0
+                            or np.all(mapped.coeffs == 0)
+                        )
                     except Exception:
-                        pass
+                        is_zero = False
+                    if is_zero:
+                        output.append(None)
+                        continue
                 output.append(mapped)
             return output
         if type(operator) == FermionOperator:
@@ -419,10 +421,9 @@ class PeriodicEncoding():
     Two construction paths are supported:
 
     1. **From PySCF** (atom + lattice vectors + k-mesh).  The supercell
-       Hamiltonian is built via the Strategy A pipeline in
-       :mod:`quantumsymmetry.periodic`, the supercell point group is
-       detected, and the maximal Boolean Z2^k subgroup is extracted
-       automatically.
+       Hamiltonian is built in :mod:`quantumsymmetry.periodic`, which selects
+       the maximal active-space Boolean subgroup from crystal-space-group
+       involutions, half-translations, and spin parities automatically.
 
     2. **BYO Hamiltonian.**  The caller supplies a pre-built
        :class:`openfermion.FermionOperator` together with +/-1 generator
@@ -437,6 +438,7 @@ class PeriodicEncoding():
                  active_bands=None, symmetry=True, verbose=False,
                  symm_energy_tol=5e-3, symm_purity_tol=0.95,
                  active_mos=None, integral_backend='kpts',
+                 enforce_symmetry=True, symmetry_leak_tol=1e-10,
                  # BYO-Hamiltonian path
                  fermion_hamiltonian=None, nspinorbital=None,
                  nelectron_up=None, nelectron_down=None,
@@ -473,6 +475,8 @@ class PeriodicEncoding():
                 symm_purity_tol=symm_purity_tol,
                 active_mos=active_mos,
                 integral_backend=integral_backend,
+                enforce_symmetry=enforce_symmetry,
+                symmetry_leak_tol=symmetry_leak_tol,
             )
             self._pyscf_periodic = pyscf_inputs
             kw = {k: v for k, v in pyscf_inputs.items() if not k.startswith('_')}
@@ -658,4 +662,3 @@ class PeriodicEncoding():
 
     qiskit_mapper = property(qiskit_mapper)
     hamiltonian = property(hamiltonian)
-

@@ -7,6 +7,7 @@ from qiskit_nature.second_q.drivers import PySCFDriver
 from qiskit_nature.second_q.mappers import JordanWignerMapper
 from qiskit_nature.second_q.circuit.library import UCCSD, HartreeFock
 from qiskit_nature.second_q.algorithms import GroundStateEigensolver
+import numpy as np
 from numpy import isclose
 
 def UCC_VQE(atom, basis, charge = 0, spin = 0, CAS = None, quick_CAS = False, encoding_type = 'SAE', symmetry = True):
@@ -42,7 +43,8 @@ def UCC_VQE(atom, basis, charge = 0, spin = 0, CAS = None, quick_CAS = False, en
     vqe = VQE(
         estimator = Estimator(),
         ansatz = ansatz,
-        optimizer = SLSQP()
+        optimizer = SLSQP(),
+        initial_point = np.zeros(ansatz.num_parameters)
    )
 
     solver = GroundStateEigensolver(mapper, vqe)
