@@ -7,7 +7,7 @@ from itertools import combinations
 from qiskit_nature.second_q.circuit.library.ansatzes import UCC
 
 def apply_encoding_mapper(operator, suppress_none=True):
-    apply_encoding(operator = operator, encoding = SymmetryAdaptedEncoding_encoding, output_format = 'qiskit')
+    return convert_encoding(operator)
 
 def convert_encoding(operators, suppress_none=True, check_commutes=False, num_particles=None, sector_locator=None):
     if type(operators) == FermionicOp:
@@ -39,19 +39,29 @@ def transform(driver, operators):
     return output1, output2
 
 def fix_qubit_order_convention(input):
-    output = 0
-    input.display_format="dense"
+    # Remap spin-orbital indices from qiskit-nature's blocked ordering
+    # (alpha-block [0, N/2) then beta-block [N/2, N)) to the interleaved
+    # ordering the symmetry-adapted encoding expects (alpha spatial k -> 2k,
+    # beta spatial k -> 2k+1).  Ported to the qiskit-nature 0.7.x FermionicOp
+    # sparse-label API (the legacy ``.to_list()``/dense-label path is gone).
     N = input.register_length
-    input_list = input.to_list()
-    for x in range(len(input_list)):
-        output_label = str()
-        input_label = input_list[x][0]
-        input_label = input_label[::-1]
-        for j in range(N//2):
-            output_label += input_label[j]
-            output_label += input_label[N//2 + j]
-        output += FermionicOp([(output_label[::-1], input_list[x][1])], display_format='dense')
-    return output
+    half = N // 2
+
+    def _remap(i):
+        return 2 * i if i < half else 2 * (i - half) + 1
+
+    new_terms = {}
+    for label, coeff in input.items():
+        if label == "":
+            new_label = ""
+        else:
+            new_tokens = []
+            for tok in label.split():
+                op, idx = tok.split("_")
+                new_tokens.append(f"{op}_{_remap(int(idx))}")
+            new_label = " ".join(new_tokens)
+        new_terms[new_label] = new_terms.get(new_label, 0) + coeff
+    return FermionicOp(new_terms, num_spin_orbitals=N)
     
 def SymmetryAdaptedEncodingQubitConverter(encoding):
     global SymmetryAdaptedEncoding_encoding
@@ -135,69 +145,35 @@ def HartreeFockCircuit(encoding, atom, basis, charge = 0, spin = 0, irrep = None
             output.x(i)
     return output
 
-def swap_plus_and_minuses(input):
-    output = str()
-    for s in input:
-        if s == '+':
-            output += '-'
-        elif s == '-':
-            output += '+'
-        else:
-            output += s
-    return output
-
 def make_fermionic_excitation_ops(reference_state):
-    number_of_qubits = len(reference_state)
-    occ = []
-    unocc = []
+    #Single and double excitation generators about a Jordan-Wigner reference
+    #determinant, as OpenFermion FermionOperators i(T +/- T^dag).  (OpenFermion's
+    #unambiguous '<mode>^ <mode>' labels are used in place of qiskit-nature's
+    #dense FermionicOp labels; apply_encoding accepts FermionOperator directly.)
     reference_state = list(reference_state)
     reference_state.reverse()
+    occ   = [i for i, x in enumerate(reference_state) if x == '1']
+    unocc = [i for i, x in enumerate(reference_state) if x == '0']
 
-    #get occupations
-    for i, x in enumerate(reference_state):
-        if x == '0':
-            unocc.append(i)
-        if x == '1':
-            occ.append(i)
+    operators = []
 
-    #singles
-    operators_s = []
-    for perm_plus in list(combinations(occ, 1)):
-        for perm_minus in list(combinations(unocc, 1)):
-            if len(set(perm_plus).union(set(perm_minus))) == 2:
-                operator = ['I']*number_of_qubits
-                for i in perm_plus:
-                    operator[i] = '+'
-                for i in perm_minus:
-                    operator[i] = '-'
-                operator = ''.join(operator)
-                operators_s.append(operator)
+    #singles: i (T + T^dag) with T = a^dag_p a_q
+    for (p,) in combinations(occ, 1):
+        for (q,) in combinations(unocc, 1):
+            excitation = (1j * FermionOperator(f'{p}^ {q}')
+                          + 1j * FermionOperator(f'{q}^ {p}'))
+            if excitation not in operators:
+                operators.append(excitation)
 
-    #doubles
-    operators_d = []
-    for perm_plus in list(combinations(occ, 2)):
-        for perm_minus in list(combinations(unocc, 2)):
-            operator = ['I']*number_of_qubits
-            for i in perm_plus:
-                operator[i] = '+'
-            for i in perm_minus:
-                operator[i] = '-'
-            operator = ''.join(operator)
-            operators_d.append(operator)
-    
-    #create fermionic operators
-    operators2 = []
-    for operator in operators_s:
-        excitation = FermionicOp([(operator, 1j), (swap_plus_and_minuses(operator), 1j)], register_length = number_of_qubits, display_format='dense')
-        if excitation not in operators2:
-            operators2.append(excitation)
+    #doubles: i (T - T^dag) with T = a^dag_p a^dag_p2 a_q a_q2
+    for (p, p2) in combinations(occ, 2):
+        for (q, q2) in combinations(unocc, 2):
+            excitation = (1j * FermionOperator(f'{p}^ {p2}^ {q} {q2}')
+                          - 1j * FermionOperator(f'{q2}^ {q}^ {p2} {p}'))
+            if excitation not in operators:
+                operators.append(excitation)
 
-    for operator in operators_d:
-        excitation = FermionicOp([(operator, 1j), (swap_plus_and_minuses(operator), -1j)], register_length = number_of_qubits, display_format='dense')
-        if excitation not in operators2:
-            operators2.append(excitation)
-
-    return operators2
+    return operators
 
 def make_excitation_ops(reference_state, encoding):
     operators = []
@@ -234,7 +210,7 @@ def UCC_SAE_circuit(atom, basis, charge = 0, spin = 0, irrep = None, CAS = None,
         excitations = excitations,
         num_particles = num_particles,
         initial_state = initial_state,
-        num_spin_orbitals = num_spin_orbitals,
-        qubit_converter = qubit_converter,
+        num_spatial_orbitals = num_spin_orbitals // 2,
+        qubit_mapper = qubit_converter,
     )
     return ansatz

@@ -3,8 +3,14 @@ from itertools import combinations
 from pyscf import gto, scf, symm, ao2mo, mp, mcscf
 from openfermion import QubitOperator, FermionOperator, jordan_wigner, utils, linalg
 from qiskit import quantum_info
-from qiskit_nature.second_q.operators import FermionicOp
-from qiskit_nature.second_q.mappers import JordanWignerMapper
+# qiskit-nature is an optional interop dependency; the encoding core (built on
+# openfermion) does not require it, so import it softly.  When absent the
+# FermionicOp type-checks below are simply never taken.
+try:
+    from qiskit_nature.second_q.operators import FermionicOp
+    from qiskit_nature.second_q.mappers import JordanWignerMapper
+except ImportError:
+    FermionicOp = JordanWignerMapper = None
 from IPython.display import display, HTML
 from tabulate import tabulate
 from concurrent.futures import ThreadPoolExecutor

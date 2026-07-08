@@ -1,6 +1,5 @@
 from pyscf import gto, scf, mp, mcscf, symm
-from .core import * 
-from .qiskit_converter import UCC_SAE_circuit
+from .core import *
 from qiskit.circuit.quantumcircuit import QuantumCircuit
 import numpy as np
 from numpy import linalg
@@ -8,8 +7,15 @@ from tabulate import tabulate
 from IPython.display import display, HTML
 from openfermion import QubitOperator, FermionOperator, jordan_wigner, utils, linalg
 from qiskit import quantum_info
-from qiskit_nature.second_q.operators import FermionicOp
-from qiskit_nature.second_q.mappers import QubitMapper, JordanWignerMapper, InterleavedQubitMapper
+# qiskit-nature is an optional interop dependency; the encoding itself (built on
+# openfermion) does not require it, so import it softly.  When absent the
+# FermionicOp type-checks are never taken and the qiskit_mapper property raises a
+# clear error pointing at the optional extra.
+try:
+    from qiskit_nature.second_q.operators import FermionicOp
+    from qiskit_nature.second_q.mappers import QubitMapper, JordanWignerMapper, InterleavedQubitMapper
+except ImportError:
+    FermionicOp = QubitMapper = JordanWignerMapper = InterleavedQubitMapper = None
 import time
 
 class Encoding():
@@ -352,6 +358,10 @@ class Encoding():
 
     def qiskit_mapper(self):
         #QubitMapper object
+        if QubitMapper is None:
+            raise ImportError(
+                "Encoding.qiskit_mapper requires the optional qiskit-nature "
+                "interop; install it with: pip install 'quantumsymmetry[qiskit]'")
         mapper = QubitMapper()
         mapper.map = self.apply
         return mapper
@@ -397,7 +407,141 @@ class Encoding():
                 output.x(i)
         
         return output
-    
+
+    def _check_basic_mapping_supported(self):
+        # The forward/decode affine maps below are derived for the plain
+        # symmetry-adapted encoding. CAS tapering (extra frozen/virtual columns)
+        # and the optional final JW->BK Clifford are not covered here.
+        if not self.symmetry:
+            raise NotImplementedError(
+                "JW<->SAE mappings require symmetry=True."
+            )
+        if self.bravyi_kitaev:
+            raise NotImplementedError(
+                "JW<->SAE mappings are not implemented for the Bravyi-Kitaev "
+                "post-transform."
+            )
+
+    @property
+    def encoded_qubits(self):
+        """Number of qubits in the symmetry-adapted encoding (after tapering)."""
+        return self.nspinorbital - len(self.target_qubits)
+
+    def _kept_qubits(self):
+        # Spin-orbital indices that survive tapering, in encoded-qubit order
+        # (encoded qubit j corresponds to spin-orbital _kept_qubits()[j]).
+        target = set(self.target_qubits)
+        return [i for i in range(self.nspinorbital) if i not in target]
+
+    def _decode_matrix(self):
+        # Reuse the same M_XX construction as core.qubit_table: take the
+        # top-left tableau block, drop the tapered (target) columns. The
+        # occupancy of spin-orbital i is f_i = sum_j M_XX_red[i, j] q_j + s_i.
+        # By construction the rows at the kept spin-orbitals form the identity,
+        # so the encoded bit q_j equals f_{kept[j]} + sign_{kept[j]}; the
+        # forward map inverts the decode by reading those bits off.
+        n = self.nspinorbital
+        tableau = np.array(self.tableau)
+        M_XX = (1 - tableau[:n, :n]) // 2
+        target = sorted(self.target_qubits)
+        M_XX_red = np.delete(M_XX, target, axis=1)
+        sign = (1 - np.array(self.tableau_signs)[:n]) // 2
+        return M_XX_red, sign
+
+    def sae_to_jw(self, q):
+        """Decode a symmetry-adapted computational-basis state to its
+        Jordan-Wigner spin-orbital occupancies.
+
+        Args:
+            q (int): SAE computational-basis leaf (bit j is encoded qubit j).
+
+        Returns:
+            int: the Jordan-Wigner determinant (bit i is spin-orbital i).
+        """
+        self._check_basic_mapping_supported()
+        nq = self.encoded_qubits
+        M_XX_red, sign = self._decode_matrix()
+        q_bits = np.array([(int(q) >> j) & 1 for j in range(nq)], dtype=int)
+        f = (M_XX_red @ q_bits + sign) % 2
+        return int(sum(int(f[i]) << i for i in range(self.nspinorbital)))
+
+    def jw_to_sae(self, a):
+        """Encode a Jordan-Wigner computational-basis state into the
+        symmetry-adapted encoding.
+
+        Args:
+            a (int): Jordan-Wigner determinant (bit i is spin-orbital i).
+
+        Returns:
+            int: the SAE leaf (bit j is encoded qubit j).
+
+        Raises:
+            ValueError: if ``a`` is not representable in this encoding (i.e. it
+                is not in the target symmetry sector, or for a CAS encoding does
+                not have the frozen-core orbitals occupied and the virtual
+                orbitals empty).
+        """
+        self._check_basic_mapping_supported()
+        n = self.nspinorbital
+        _, sign = self._decode_matrix()
+        a_bits = np.array([(int(a) >> i) & 1 for i in range(n)], dtype=int)
+        # Forward map inverts the decode: q_j = a_{kept[j]} + sign_{kept[j]}
+        # (the kept-row submatrix of the decode matrix is the identity).
+        kept = self._kept_qubits()
+        q = int(sum(((int(a_bits[kept[j]]) ^ int(sign[kept[j]])) << j)
+                    for j in range(len(kept))))
+        # Validate by decoding back: a is representable iff it round-trips.
+        if self.sae_to_jw(q) != int(a):
+            raise ValueError(
+                "Jordan-Wigner state is not representable in this "
+                "symmetry-adapted encoding."
+            )
+        return q
+
+    def symmetry_adapted_support(self, num_particles=None):
+        """List the SAE computational-basis leaves spanning the target sector.
+
+        These are exactly the leaves whose decoded Jordan-Wigner occupancies
+        have the requested number of spin-up and spin-down electrons, suitable
+        as the ``support`` argument of a minimal tree circuit.
+
+        Args:
+            num_particles (tuple, optional): ``(n_alpha, n_beta)``. Defaults to
+                the molecule's ``(nelectron_up, nelectron_down)``.
+
+        Returns:
+            list[int]: sorted SAE leaves in the target sector.
+        """
+        self._check_basic_mapping_supported()
+        if num_particles is None:
+            na, nb = self.nelectron_up, self.nelectron_down
+        else:
+            na, nb = num_particles
+        nq = self.encoded_qubits
+        M_XX_red, sign = self._decode_matrix()
+        n = self.nspinorbital
+        alpha = [2 * i for i in range(n // 2)]
+        beta = [2 * i + 1 for i in range(n // 2)]
+        support = []
+        for q in range(1 << nq):
+            q_bits = np.array([(q >> j) & 1 for j in range(nq)], dtype=int)
+            f = (M_XX_red @ q_bits + sign) % 2
+            if f[alpha].sum() == na and f[beta].sum() == nb:
+                support.append(q)
+        return support
+
+    @property
+    def hartree_fock_leaf(self):
+        """The SAE computational-basis leaf of the Hartree-Fock determinant.
+
+        This is the natural single-determinant reference state for a
+        variational optimisation in the symmetry-adapted encoding.
+
+        Returns:
+            int: the SAE leaf (bit j is encoded qubit j).
+        """
+        return self.jw_to_sae(HartreeFock_ket(self.mo_occ))
+
     qiskit_mapper = property(qiskit_mapper)
     hamiltonian = property(hamiltonian)
     HF_circuit = property(HF_circuit)
@@ -656,6 +800,11 @@ class PeriodicEncoding():
         return self.apply(self.jordan_wigner_hamiltonian)
 
     def qiskit_mapper(self):
+        if QubitMapper is None:
+            raise ImportError(
+                "PeriodicEncoding.qiskit_mapper requires the optional "
+                "qiskit-nature interop; install it with: "
+                "pip install 'quantumsymmetry[qiskit]'")
         mapper = QubitMapper()
         mapper.map = self.apply
         return mapper

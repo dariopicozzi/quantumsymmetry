@@ -4,7 +4,7 @@
 
 # QuantumSymmetry
 
-QuantumSymmetry is an open-source Python package for research in molecular physics using quantum computing. It allows to encode more efficiently information about a molecular system on a quantum computer using symmetry-adapted encodings.
+QuantumSymmetry is an open-source Python package for research in molecular physics using quantum computing. It allows to encode more efficiently information about a molecular system on a quantum computer using symmetry-adapted encodings, and provides a universal hardware-efficient variational ansatz (`MinimalCircuit`) whose Fubini–Study metric is diagonal in closed form.
 
 QuantumSymmetry uses [PySCF](https://github.com/pyscf/pyscf) to perform Hartre-Fock calculations, for the calculation of one- and two-electron integrals and the construction of symmetry-adapted molecular orbitals. It automatically retrieves from PySCF the largest Boolean symmetry group for the input molecular geometry, as well as the irreducible representation of its HF ground state.
 
@@ -36,9 +36,25 @@ This can be used for example to obtain the symmetry-adapted encoding qubit Hamil
 encoding.hamiltonian
 ```
 
+## Binary-tree variational ansatz
+
+QuantumSymmetry also provides `MinimalCircuit`, a universal hardware-efficient variational ansatz built from a binary tree of uniformly controlled rotations. Its Fubini–Study metric is diagonal in closed form, so quantum natural gradient, imaginary- and real-time evolution, and exact sector-restricted (Haar) sampling run with no auxiliary metric circuits and no matrix inversion. When the target state lives in a symmetry sector, a pruning compiler produces circuits whose two-qubit gate count grows linearly in the number of active basis states.
+
+```python
+from quantumsymmetry import MinimalCircuit
+
+# Two spatial orbitals (4 qubits), one spin-up and one spin-down electron
+mc = MinimalCircuit.from_particle_number(num_spatial_orbitals = 2, num_particles = (1, 1))
+
+mc.circuit          # the pruned Qiskit circuit
+mc.num_parameters   # number of free tree angles
+```
+
+The same object drives natural-gradient VQE (`minimize_energy`), real- and imaginary-time evolution (`evolve_realtime`), sector-Haar sampling (`sample_sector_haar`), a Schrieffer–Wolff dressing layer (`make_dressing_pool`), and exact total-spin adaptation (`MinimalCircuit.from_particle_number(..., total_spin = S)`).
+
 ## Tutorials
 
-Interactive tutorials with code snippets hosted on Google Colab can be found [here](https://colab.research.google.com/github/dariopicozzi/quantumsymmetry/blob/master/docs/tutorials/01_welcome.ipynb).
+Interactive tutorials with code snippets are hosted on Google Colab: the [symmetry-adapted encodings series](https://colab.research.google.com/github/dariopicozzi/quantumsymmetry/blob/master/docs/tutorials/01_welcome.ipynb) and the [binary-tree ansatz series](https://colab.research.google.com/github/dariopicozzi/quantumsymmetry/blob/master/docs/tutorials/tree_01_welcome.ipynb).
 
 ## How to cite
 

@@ -1,13 +1,13 @@
-# Required
+# Read the Docs configuration file (v2 schema)
+# https://docs.readthedocs.io/en/stable/config-file/v2.html
 version: 2
 
-# Image to use
 build:
-  image: testing
+  os: ubuntu-22.04
+  tools:
+    python: "3.11"
 
-# Configuration
 python:
-  version: 3.8
   install:
     - requirements: docs/requirements.txt
     - method: pip

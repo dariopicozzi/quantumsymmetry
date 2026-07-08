@@ -1,12 +1,25 @@
+import pytest
 from ..quantumsymmetry import Encoding
-from qiskit_algorithms.optimizers import SLSQP
-from qiskit.primitives import Estimator
-from qiskit_algorithms import VQE
-from qiskit_nature.units import DistanceUnit
-from qiskit_nature.second_q.drivers import PySCFDriver
-from qiskit_nature.second_q.mappers import JordanWignerMapper
-from qiskit_nature.second_q.circuit.library import UCCSD, HartreeFock
-from qiskit_nature.second_q.algorithms import GroundStateEigensolver
+from qiskit.primitives import StatevectorEstimator
+# This module exercises the optional qiskit-nature interop (the qiskit
+# QubitMapper / UCCSD path).  Skip the whole module gracefully when that extra is
+# not installed (``pip install 'quantumsymmetry[qiskit]'``), or when qiskit-nature
+# 0.7's algorithms subpackage is broken on qiskit >= 2 (it imports the V1
+# ``BaseEstimator`` that qiskit >= 2 removed), rather than erroring on collection.
+try:
+    from qiskit_algorithms.optimizers import SLSQP
+    from qiskit_algorithms import VQE
+    from qiskit_nature.units import DistanceUnit
+    from qiskit_nature.second_q.drivers import PySCFDriver
+    from qiskit_nature.second_q.mappers import JordanWignerMapper
+    from qiskit_nature.second_q.circuit.library import UCCSD, HartreeFock
+    from qiskit_nature.second_q.algorithms import GroundStateEigensolver
+except ImportError:
+    pytest.skip(
+        "qiskit-nature interop unavailable (optional 'quantumsymmetry[qiskit]' "
+        "extra not installed, or qiskit-nature 0.7 incompatible with qiskit >= 2)",
+        allow_module_level=True,
+    )
 import numpy as np
 from numpy import isclose
 
@@ -41,7 +54,7 @@ def UCC_VQE(atom, basis, charge = 0, spin = 0, CAS = None, quick_CAS = False, en
         )
 
     vqe = VQE(
-        estimator = Estimator(),
+        estimator = StatevectorEstimator(),
         ansatz = ansatz,
         optimizer = SLSQP(),
         initial_point = np.zeros(ansatz.num_parameters)

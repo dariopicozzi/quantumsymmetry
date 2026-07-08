@@ -1,25 +1,33 @@
 [tool.poetry]
 name = "quantumsymmetry"
-version = "0.2.17"
+version = "0.3.0"
 description = "Quantum computing research package"
 authors = ["Dario Picozzi"]
 license = "GNU General Public License v3.0"
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.7"
+python = ">=3.10,<3.15"
 numpy = "*"
+scipy = "*"
 pyscf = "^2.6"
 openfermion = "*"
-qiskit = "~1.1"
-qiskit_nature = "^0.7"
+qiskit = ">=1.1"
 ipython = "*"
 tabulate = "*"
+# qiskit-nature is needed only for the qiskit interop (UCC_SAE_circuit, the
+# qiskit QubitMapper converter); qiskit-algorithms only for the UCC VQE tests.
+# Neither is required by the symmetry-adapted encoding or the tree-circuit
+# ansatz, so they are an optional extra: pip install 'quantumsymmetry[qiskit]'.
+qiskit_nature = { version = "^0.7", optional = true }
+qiskit_algorithms = { version = ">=0.3", optional = true }
 
-[tool.poetry.dev-dependencies]
+[tool.poetry.extras]
+qiskit = ["qiskit_nature", "qiskit_algorithms"]
+
 [tool.semantic_release]
 version_variable = "pyproject.toml:version" # version location
-branch = "main"                             # branch to make releases of
+branch = "master"                           # branch to make releases of
 changelog_file = "CHANGELOG.md"             # changelog file
 build_command = "poetry build"              # build dists
 dist_path = "dist/"                         # where to put dists
