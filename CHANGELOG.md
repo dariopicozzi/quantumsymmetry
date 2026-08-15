@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- Fix periodic Gamma folding on larger even k-point meshes by using the
+  requested mesh consistently in PySCF's forward and inverse transformations.
+
 ## 0.3.0
 
 Adds the binary-tree variational ansatz (`MinimalCircuit`) and its companion

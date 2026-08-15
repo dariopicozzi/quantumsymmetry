@@ -13,6 +13,9 @@ from openfermion.linalg import get_sparse_operator
 
 from ..quantumsymmetry import PeriodicEncoding
 from ..quantumsymmetry.periodic import (
+    _supercell_mo_to_kpt_mo,
+    build_cell,
+    fold_to_supercell,
     spin_parity_generators,
     half_translation_generators,
 )
@@ -118,6 +121,50 @@ def _half_filled_gens(mesh, n_so, nelectron_up, nelectron_down):
 # ===========================================================================
 # Tests
 # ===========================================================================
+
+def test_explicit_422_fold_mesh_roundtrip():
+    """The fold and inverse phase must use the caller's explicit k-mesh.
+
+    PySCF's automatic inference can identify a (4,2,2) mesh as (3,2,2) when
+    bounded by the cell's real-space image estimate.  A one-AO mock KRHF
+    object catches that regression without running an SCF calculation.
+    """
+    from pyscf.pbc import scf as pbcscf
+
+    mesh = (4, 2, 2)
+    cell = build_cell(
+        atom="He 0 0 0",
+        a=np.diag([4.5, 4.5, 4.5]),
+        basis={"He": [[0, [1.0, 1.0]]]},
+        kpts_mesh=mesh,
+    )
+    kpts = cell.make_kpts(mesh)
+    kmf = pbcscf.KRHF(cell, kpts=kpts, exxdiv="ewald")
+    overlap_k = np.asarray(kmf.get_ovlp())
+    kmf.mo_coeff = [
+        np.asarray([[1.0 / np.sqrt(overlap_k[k, 0, 0])]], dtype=complex)
+        for k in range(len(kpts))
+    ]
+    kmf.mo_energy = [np.asarray([float(k)]) for k in range(len(kpts))]
+    kmf.mo_occ = [np.asarray([0.0]) for _ in range(len(kpts))]
+
+    mf_sc, _order, n_k, _n_bands = fold_to_supercell(kmf, kmesh=mesh)
+    assert n_k == int(np.prod(mesh))
+    assert mf_sc.cell.natm == int(np.prod(mesh)) * cell.natm
+
+    C = np.asarray(mf_sc.mo_coeff)
+    overlap_sc = np.asarray(mf_sc.get_ovlp())
+    assert np.allclose(C.conj().T @ overlap_sc @ C, np.eye(n_k), atol=1e-10)
+
+    C_at_k = _supercell_mo_to_kpt_mo(mf_sc, kmf, C)
+    hcore_k = np.asarray(kmf.get_hcore())
+    hcore_from_k = sum(
+        C_at_k[k].conj().T @ hcore_k[k] @ C_at_k[k]
+        for k in range(n_k)
+    )
+    hcore_sc = C.conj().T @ np.asarray(mf_sc.get_hcore()) @ C
+    assert np.allclose(hcore_from_k, hcore_sc, atol=1e-9)
+
 
 def test_hubbard_2sites_1d():
     """Smallest non-trivial: 1-band Hubbard on a 2-site 1D cell.

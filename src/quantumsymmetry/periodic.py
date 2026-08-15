@@ -129,8 +129,13 @@ def run_krhf(cell, kpts_mesh, df='auto', exxdiv='ewald'):
 # Fold to Gamma-point supercell (preserves (band, k) labelling)
 # ---------------------------------------------------------------------------
 
-def fold_to_supercell(kmf):
+def fold_to_supercell(kmf, kmesh):
     """Fold a KRHF object into a Gamma-point supercell RHF object.
+
+    The generating Monkhorst--Pack ``kmesh`` is passed explicitly to PySCF.
+    Automatic inference can be bounded by the cell's real-space image estimate
+    and undercount a valid mesh.  The same mesh is retained for the inverse
+    supercell-to-k-point phase transformation.
 
     Returns
     -------
@@ -145,7 +150,9 @@ def fold_to_supercell(kmf):
     """
     from pyscf.pbc.tools import k2gamma
 
-    mf_sc = k2gamma.k2gamma(kmf)
+    kmesh = tuple(kmesh)
+    mf_sc = k2gamma.k2gamma(kmf, kmesh=kmesh)
+    mf_sc._fold_kmesh = kmesh
 
     n_k = len(kmf.kpts)
     # Each k-point contributes the same number of spatial MOs (full window).
@@ -543,10 +550,11 @@ def _supercell_mo_to_kpt_mo(mf_sc, kmf, mo_sc):
     """Convert supercell MO coefficients (``(n_ao_sc, n_mo)`` real or
     complex) to per-k primitive AO MO coefficients.
 
-    Uses the k2gamma Bloch unitary
-    ``phi^SC_{R,nu} = sum_k conj(phase[R,k]) phi^prim_{k,nu}``,
-    where ``phase[R,k] = exp(i k.R) / sqrt(N_R)`` and ``N_R = N_k`` is
-    the number of unit cells in the supercell.
+    PySCF's forward fold uses
+    ``phi^SC_{R,nu} = sum_k phase[R,k] phi^prim_{k,nu}``, where
+    ``phase[R,k] = exp(i k.R) / sqrt(N_R)`` and ``N_R = N_k``.  This
+    inverse decomposition therefore contracts a supercell coefficient with
+    ``conj(phase[R,k])``.
 
     Returns
     -------
@@ -556,7 +564,9 @@ def _supercell_mo_to_kpt_mo(mf_sc, kmf, mo_sc):
     from pyscf.pbc.tools import k2gamma as k2g
     cell_prim = kmf.cell
     kpts = np.asarray(kmf.kpts)
-    _scell, phase = k2g.get_phase(cell_prim, kpts)  # phase: (N_R, n_k)
+    _scell, phase = k2g.get_phase(
+        cell_prim, kpts, kmesh=mf_sc._fold_kmesh
+    )  # phase: (N_R, n_k)
     n_R, n_k = phase.shape
     n_ao_prim = cell_prim.nao
     n_mo = mo_sc.shape[1]
@@ -2312,7 +2322,7 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
         )
 
     _stage('fold_to_supercell')
-    mf_sc, band_k_order, n_k, n_bands = fold_to_supercell(kmf)
+    mf_sc, band_k_order, n_k, n_bands = fold_to_supercell(kmf, kpts_mesh)
     _stage('fold done')
     nelec = int(round(mf_sc.cell.tot_electrons(nkpts=1)))
     nelec_up = (nelec + spin) // 2
