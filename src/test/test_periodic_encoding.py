@@ -13,12 +13,131 @@ from openfermion.linalg import get_sparse_operator
 
 from ..quantumsymmetry import PeriodicEncoding
 from ..quantumsymmetry.periodic import (
+    _iter_commuting_pg_subsets,
+    _restricted_active_involutions,
+    _select_max_rank_periodic_plan,
     _supercell_mo_to_kpt_mo,
+    _translated_space_group_ops,
     build_cell,
     fold_to_supercell,
     spin_parity_generators,
     half_translation_generators,
 )
+
+
+def test_translated_coset_orientation_and_odd_mesh_acceptance():
+    T = np.array([[0.0, 1.0], [1.0, 0.0]])
+    U = np.array([[1.0, 2.0], [3.0, 4.0]])
+    reps = [('g', U, False), ('centering', T, True)]
+    translated = list(_translated_space_group_ops(
+        [('T[0,0,0]', np.eye(2)), ('T[1,0,0]', T)],
+        reps,
+    ))
+    assert translated[0][0] == 'g'
+    assert np.array_equal(translated[0][1], U)
+    assert translated[1][0] == 'T[1,0,0].g'
+    assert np.array_equal(translated[1][1], T @ U)
+    fractional = list(_translated_space_group_ops(
+        [('T[0,0,0]', np.eye(2))], reps,
+        translations=True,
+    ))
+    assert [label for label, _ in fractional] == ['centering']
+
+    cell = build_cell(
+        atom='He 0 0 0', a=np.diag([4.0, 4.0, 4.0]),
+        basis={'He': [[0, [1.0, 1.0]]]}, kpts_mesh=(3, 1, 1),
+    )
+    assert len(cell.make_kpts([3, 1, 1])) == 3
+
+
+def test_active_restriction_accepts_only_exact_active_involutions():
+    """Order is tested after restriction, with active/core leakage rejected."""
+    S = np.eye(4)
+    C_active = np.eye(4)[:, :2]
+    C_empty = np.empty((4, 0))
+    C_occ = C_active[:, :1]
+    rotation_90 = np.array([[0.0, -1.0], [1.0, 0.0]])
+
+    # Globally order four, but diag(+1,-1) on the invariant active space.
+    active_involution = np.block([
+        [np.diag([1.0, -1.0]), np.zeros((2, 2))],
+        [np.zeros((2, 2)), rotation_90],
+    ])
+    accepted, _ = _restricted_active_involutions(
+        [('active', active_involution)], C_active, C_empty, C_occ, S,
+    )
+    assert [label for label, _ in accepted] == ['active']
+
+    # A quarter turn on the active space squares to -I and is not accepted.
+    active_order_four = np.block([
+        [rotation_90, np.zeros((2, 2))],
+        [np.zeros((2, 2)), np.eye(2)],
+    ])
+    accepted, _ = _restricted_active_involutions(
+        [('order-four', active_order_four)], C_active, C_empty, C_empty, S,
+    )
+    assert accepted == []
+
+    # Preserving the active space is insufficient if the frozen core leaks.
+    core = np.eye(4)[:, [2]]
+    core_leaking = np.eye(4)
+    core_leaking[[2, 3]] = core_leaking[[3, 2]]
+    accepted, _ = _restricted_active_involutions(
+        [('core-leak', core_leaking)], C_active, core, C_occ, S,
+    )
+    assert accepted == []
+
+
+def test_active_commutation_and_coupled_translation_deduplication():
+    """Compatibility and translation rank are properties of active actions."""
+    S = np.eye(5)
+    C_active = np.eye(5)[:, :3]
+    C_empty = np.empty((5, 0))
+    X = np.array([[0.0, 1.0], [1.0, 0.0]])
+    Z = np.diag([1.0, -1.0])
+    U1 = np.block([
+        [np.diag([-1.0, 1.0, 1.0]), np.zeros((3, 2))],
+        [np.zeros((2, 3)), X],
+    ])
+    U2 = np.block([
+        [np.diag([1.0, -1.0, 1.0]), np.zeros((3, 2))],
+        [np.zeros((2, 3)), Z],
+    ])
+    ops, _ = _restricted_active_involutions(
+        [('u1', U1), ('u2', U2)], C_active, C_empty, C_empty, S,
+    )
+    assert not np.allclose(U1 @ U2, U2 @ U1)
+    assert any(len(subset) == 2 for subset in _iter_commuting_pg_subsets(ops))
+
+    # Two coordinate halves may have the same nontrivial active action;
+    # their diagonal square root can supply a second independent action.
+    H = np.diag([-1.0, -1.0, 1.0])
+    D = np.diag([-1.0, 1.0, -1.0])
+    translations, _ = _restricted_active_involutions(
+        [('hx', H), ('hy', H.copy()), ('diagonal-root', D)],
+        np.eye(3), np.empty((3, 0)), np.empty((3, 0)), np.eye(3),
+    )
+    assert [label for label, _ in translations] == ['hx', 'diagonal-root']
+
+
+def test_active_periodic_planner_uses_restricted_boolean_image():
+    """The planner combines active-commuting translation and coset actions."""
+    rotation_90 = np.array([[0.0, -1.0], [1.0, 0.0]])
+    translation = np.block([
+        [np.diag([-1.0, 1.0, 1.0]), np.zeros((3, 2))],
+        [np.zeros((2, 3)), np.eye(2)],
+    ])
+    globally_order_four = np.block([
+        [np.diag([1.0, -1.0, 1.0]), np.zeros((3, 2))],
+        [np.zeros((2, 3)), rotation_90],
+    ])
+    plan = _select_max_rank_periodic_plan(
+        np.eye(5), np.zeros(5), np.zeros(5), np.eye(5),
+        [('g', globally_order_four)], [('T', translation)],
+        active_indices_0=[0, 1, 2], core_indices_0=[],
+    )
+    assert plan['total_rank'] == 4
+    assert set(plan['active_labels']) == {'T', 'g'}
 
 
 # ---------------------------------------------------------------------------

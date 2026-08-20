@@ -15,20 +15,15 @@ for crystals.  The pipeline is:
        existing ``ao2mo`` machinery, while preserving the (band, k, sigma)
        indexing needed for diagonal half-translation symmetries.
     4. Permute spin-orbital indices into (band, k_index, sigma) order.
-    5. Detect the largest abelian Z2^k symmetry subgroup made of
-            (a) spin parities P_up, P_dn,
-            (b) one half-supercell translation per even-mesh axis,
-            (c) Boolean point-group descent for the symmorphic point group.
+    5. Restrict the finite Born--von Karman space-group action to the
+       selected active orbitals and detect its largest commuting Boolean
+       subgroup, together with the two spin parities P_up and P_dn.
     6. Build the second-quantised FermionOperator and the +/-1 generator
        arrays in the (band, k_index, sigma) interleaved indexing.
 
-Monkhorst-Pack mesh restrictions: every axis dimension must be either 1
-or even.  A Z_2 half-supercell translation along axis i exists if and only
-if the mesh size n_i along that axis is even, since translation by half the
-supercell period (n_i / 2) * a_i has order 2 in the supercell periodic
-boundary conditions and acts as +/-1 on every Bloch state.  Odd mesh sizes
-(n_i = 3, 5, ...) would give Z_{n_i} (not Z_2) translation symmetries and
-are rejected.
+The finite translation group is enumerated for any positive commensurate
+mesh.  An operation is used by SAE only when its restriction to the active
+space is a real involution with eigenvalues +/-1.
 """
 
 from __future__ import annotations
@@ -58,10 +53,7 @@ def build_cell(atom, a, basis, kpts_mesh, pseudo=None, spin=0, charge=0,
     basis : str | dict
         Gaussian basis set.
     kpts_mesh : tuple[int, int, int]
-        Monkhorst-Pack mesh.  Each entry must be 1 or even.  Even-axis
-        sizes (2, 4, 6, ...) admit a Z_2 half-supercell translation along
-        that axis; odd sizes > 1 give Z_n translations and are not
-        supported by the SAE Z_2 framework.
+        Positive Monkhorst-Pack mesh dimensions.
     pseudo : str | dict | None
         PySCF pseudopotential.  When provided the SCF will use GDF.
     """
@@ -73,12 +65,6 @@ def build_cell(atom, a, basis, kpts_mesh, pseudo=None, spin=0, charge=0,
     for m in mesh:
         if m < 1:
             raise ValueError(f"kpts_mesh entries must be >= 1; got {mesh}")
-        if m > 1 and m % 2 != 0:
-            raise ValueError(
-                f"kpts_mesh entries must be 1 or even (odd axis sizes > 1 "
-                f"do not admit Z_2 half-supercell translation symmetries); "
-                f"got {mesh}"
-            )
 
     cell = pbcgto.Cell()
     cell.atom = atom
@@ -1739,14 +1725,15 @@ def _axis_label(R):
 
 def _extra_supercell_pg_ops(prim_cell, mf_sc, S, atol_pos=1e-4,
                              ortho_tol=1e-6):
-    """Enumerate space-group involutions of the *primitive* cell that close
-    on the supercell as orthogonal AO operators.
+    """Enumerate primitive-cell space-group representatives that close on
+    the Born--von Karman supercell as orthogonal AO operators.
 
     Returns
     -------
-    ops : list of (label, U_ao) tuples
+    ops : list of (label, U_ao, is_translation) tuples
         Each ``U_ao`` is an (n_ao_sc, n_ao_sc) real matrix that satisfies
-        ``U^T S U = S`` (orthogonal w.r.t. AO overlap).
+        ``U^T S U = S`` (orthogonal w.r.t. AO overlap).  The final flag is
+        true for fractional pure-translation representatives.
     """
     from pyscf.pbc import gto as _pbcgto
     cell_sym = _pbcgto.Cell()
@@ -1793,14 +1780,14 @@ def _extra_supercell_pg_ops(prim_cell, mf_sc, S, atol_pos=1e-4,
     n_ao = sc_cell.nao
     out = []
     seen_signatures = set()  # avoid duplicates from equivalent ops
+    label_counts = {}
 
     for op_idx, op in enumerate(ls.ops):
-        if op.is_eye:
-            continue
         R = np.asarray(op.rot, dtype=int)
-        if not np.array_equal(R @ R, np.eye(3, dtype=int)):
-            continue  # not an involution in the rotation part
         t = np.asarray(op.trans, dtype=float)
+        if (np.array_equal(R, np.eye(3, dtype=int))
+                and np.max(np.abs(t - np.round(t))) < 1e-12):
+            continue
 
         # Cartesian rotation/translation
         R_cart = a_prim_bohr.T @ R.astype(float) @ inv_prim_T
@@ -1862,16 +1849,103 @@ def _extra_supercell_pg_ops(prim_cell, mf_sc, S, atol_pos=1e-4,
             continue
         seen_signatures.add(sig)
 
-        label = _axis_label(R)
-        out.append((label, U))
+        base_label = _axis_label(R)
+        label_counts[base_label] = label_counts.get(base_label, 0) + 1
+        count = label_counts[base_label]
+        label = base_label if count == 1 else f"{base_label}#{count}"
+        out.append((label, U, bool(np.array_equal(
+            R, np.eye(3, dtype=int)
+        ))))
     return out
 
 
-def _refine_blocks_with_extra_ops(mo_coeff, S, candidate_ops, blocks,
+def _bvk_translation_ops(cell_sc, prim_a_bohr, kpts_mesh):
+    """Return every finite Born--von Karman translation, including identity."""
+    mesh = tuple(int(n) for n in kpts_mesh)
+    out = []
+    for m in itertools.product(*(range(n) for n in mesh)):
+        if all(x == 0 for x in m):
+            T = np.eye(cell_sc.nao)
+        else:
+            shift = sum((m[i] * prim_a_bohr[i] for i in range(3)),
+                        start=np.zeros(3))
+            atom_perm = _atom_permutation_under_translation(cell_sc, shift)
+            T = _ao_translation_matrix(cell_sc, atom_perm)
+        out.append((f"T[{m[0]},{m[1]},{m[2]}]", T))
+    return out
+
+
+def _translated_space_group_ops(translation_ops, space_group_ops,
+                                translations=False):
+    """Yield all ``T_m g`` elements in the requested quotient class."""
+    for t_label, T in translation_ops:
+        is_identity = t_label == 'T[0,0,0]'
+        row_source = None if is_identity else np.argmax(T, axis=1)
+        for g_label, U, is_translation in space_group_ops:
+            if is_translation != translations:
+                continue
+            shifted = U if is_identity else U[row_source, :]
+            label = g_label if is_identity else f"{t_label}.{g_label}"
+            yield label, shifted
+
+
+def _metric_subspace_residual(U, C, S):
+    """Return the RMS S-norm by which ``U`` leaks out of ``span(C)``."""
+    if C.shape[1] == 0:
+        return 0.0, np.zeros((0, 0), dtype=float)
+    M = C.T @ S @ U @ C
+    leak = U @ C - C @ M
+    norm2 = float(np.vdot(leak, S @ leak).real)
+    return np.sqrt(max(norm2, 0.0) / C.shape[1]), M
+
+
+def _restricted_active_involutions(candidates, C_active, C_core,
+                                    C_active_occ, S, tol=1e-5,
+                                    occupation_tol=1e-4,
+                                    seen_actions=None):
+    """Restrict candidates and retain distinct real active involutions.
+
+    Active, frozen-core, and active occupied subspaces must all be invariant;
+    the occupied projector uses a slightly looser tolerance to accommodate
+    small numerical symmetry leakage in the SCF orbitals.
+    The involution test is applied to the raw restricted matrix before its
+    harmless numerical symmetrisation.
+    """
+    n_active = C_active.shape[1]
+    eye = np.eye(n_active)
+    seen = [] if seen_actions is None else seen_actions
+    accepted = []
+    for label, U in candidates:
+        active_spill, M = _metric_subspace_residual(U, C_active, S)
+        if active_spill > tol:
+            continue
+        scale = np.sqrt(max(n_active, 1))
+        if np.linalg.norm(M.T @ M - eye, ord='fro') / scale > tol:
+            continue
+        if np.linalg.norm(M @ M - eye, ord='fro') / scale > tol:
+            continue
+        core_spill, _ = _metric_subspace_residual(U, C_core, S)
+        if core_spill > tol:
+            continue
+        occ_spill, _ = _metric_subspace_residual(U, C_active_occ, S)
+        if occ_spill > occupation_tol:
+            continue
+        M = (M + M.T) / 2
+        if (np.linalg.norm(M - eye, ord='fro') / scale <= tol
+                or np.linalg.norm(M + eye, ord='fro') / scale <= tol):
+            continue
+        if any(min(np.linalg.norm(M - old, ord='fro'),
+                   np.linalg.norm(M + old, ord='fro')) / scale <= tol
+               for old in seen):
+            continue
+        seen.append(M)
+        accepted.append((label, M))
+    return accepted, seen
+
+
+def _refine_blocks_with_extra_ops(mo_coeff, candidate_ops, blocks,
                                    eig_tol=1e-2, spill_tol=1e-2):
-    """For each candidate op (label, U_ao), check that it acts block-diagonally
-    on the current ``blocks`` partition of MO indices, that its block-eigenvalues
-    are ±1, and (if so) rotate within each block to diagonalise it.
+    """Jointly diagonalise restricted involutions within active MO blocks.
 
     Returns
     -------
@@ -1882,11 +1956,11 @@ def _refine_blocks_with_extra_ops(mo_coeff, S, candidate_ops, blocks,
     n_mo = mo_coeff.shape[1]
     accepted = []
     cur_coeff = mo_coeff.copy()
+    cur_rotation = np.eye(n_mo)
     cur_blocks = [list(b) for b in blocks]
 
-    for label, U in candidate_ops:
-        # MO-basis representation of U
-        M = cur_coeff.T @ S @ U @ cur_coeff
+    for label, M_initial in candidate_ops:
+        M = cur_rotation.T @ M_initial @ cur_rotation
         M = (M + M.T) / 2  # symmetrise (involution -> symmetric in MO basis up to numerics)
 
         # Check block-diagonal structure: off-diagonal-block norm small
@@ -1909,10 +1983,12 @@ def _refine_blocks_with_extra_ops(mo_coeff, S, candidate_ops, blocks,
         # Apply rotations and refine blocks
         sign_vec = np.zeros(n_mo, dtype=int)
         new_coeff = cur_coeff.copy()
+        new_rotation = cur_rotation.copy()
         new_blocks = []
         for block, w, v in per_block:
             block_arr = np.asarray(block)
             new_coeff[:, block_arr] = cur_coeff[:, block_arr] @ v
+            new_rotation[:, block_arr] = cur_rotation[:, block_arr] @ v
             signs = np.where(w > 0, +1, -1).astype(int)
             for j_local, j in enumerate(block):
                 sign_vec[j] = int(signs[j_local])
@@ -1927,7 +2003,6 @@ def _refine_blocks_with_extra_ops(mo_coeff, S, candidate_ops, blocks,
             existing_b = (existing < 0).astype(int)  # GF(2)
             new_b = (sign_vec < 0).astype(int)
             # Solve A^T x = new_b mod 2 ; if solvable -> dependent
-            from numpy.linalg import matrix_rank
             stacked = np.vstack([existing_b, new_b]) % 2
             r_with = _gf2_rank(stacked)
             r_without = _gf2_rank(existing_b)
@@ -1936,6 +2011,7 @@ def _refine_blocks_with_extra_ops(mo_coeff, S, candidate_ops, blocks,
 
         accepted.append((label, sign_vec))
         cur_coeff = new_coeff
+        cur_rotation = new_rotation
         cur_blocks = new_blocks
 
     return cur_coeff, cur_blocks, accepted
@@ -1965,14 +2041,17 @@ def _gf2_rank(M):
     return r
 
 
-def _energy_blocks(mo_energy, energy_tol=5e-3):
-    """Return MO-index blocks grouped only by approximate energy."""
+def _energy_blocks(mo_energy, energy_tol=5e-3, mo_occ=None):
+    """Return approximate-energy blocks without mixing occupation classes."""
     order = np.argsort(mo_energy)
     blocks = []
     cur = [int(order[0])]
     for j in order[1:]:
         j = int(j)
-        if abs(mo_energy[j] - mo_energy[cur[0]]) < energy_tol:
+        same_occ = (mo_occ is None
+                    or abs(float(mo_occ[j]) - float(mo_occ[cur[0]])) < 0.5)
+        if (abs(mo_energy[j] - mo_energy[cur[0]]) < energy_tol
+                and same_occ):
             cur.append(j)
         else:
             blocks.append(cur)
@@ -1985,53 +2064,18 @@ def _commutes(A, B, tol=1e-6):
     return float(np.linalg.norm(A @ B - B @ A, ord='fro')) <= tol
 
 
-def _gf2_basis_indices(bit_vectors):
-    """Return indices selecting a row basis of the supplied GF(2) vectors."""
-    if not bit_vectors:
-        return []
-    bits = [list(map(int, v)) for v in bit_vectors]
-    rows = list(range(len(bits)))
-    chosen_rows = []
-    pivot_col = 0
-    n_col = len(bits[0])
-    while pivot_col < n_col and rows:
-        pivot_row = next((r for r in rows if bits[r][pivot_col] == 1), None)
-        if pivot_row is None:
-            pivot_col += 1
-            continue
-        chosen_rows.append(pivot_row)
-        for r in rows:
-            if r != pivot_row and bits[r][pivot_col] == 1:
-                bits[r] = [(a ^ b) for a, b in zip(bits[r], bits[pivot_row])]
-        rows.remove(pivot_row)
-        pivot_col += 1
-    return chosen_rows
-
-
-def _translation_basis_commuting_with_ops(T_ao_primitives, pg_ops, tol=1e-6):
-    """Return a GF(2) basis of half-translations commuting with ``pg_ops``."""
-    d = len(T_ao_primitives)
-    passing_bits = []
-    passing_ops = []
-    passing_combos = []
-    for code in range(1, 1 << d):
-        bits = tuple((code >> i) & 1 for i in range(d))
-        T = None
-        combo = []
-        for i, bit in enumerate(bits):
-            if bit:
-                T = T_ao_primitives[i] if T is None else T @ T_ao_primitives[i]
-                combo.append(i)
-        if all(_commutes(T, U, tol=tol) for _, U in pg_ops):
-            passing_bits.append(bits)
-            passing_ops.append(T)
-            passing_combos.append(tuple(combo))
-    basis = _gf2_basis_indices(passing_bits)
-    return [(passing_combos[i], passing_ops[i]) for i in basis]
+def _translations_commuting_with_ops(translation_ops, pg_ops, tol=1e-6):
+    """Return active involutory translations compatible with ``pg_ops``."""
+    return [op for op in translation_ops
+            if all(_commutes(op[1], pg[1], tol=tol) for pg in pg_ops)]
 
 
 def _iter_commuting_pg_subsets(extra_ops, max_rank=3, tol=1e-6):
-    """Yield all pairwise-commuting crystal-PG subsets up to rank 3."""
+    """Yield active-commuting nontranslation subsets up to quotient rank 3.
+
+    After all translations are separated, a three-dimensional
+    crystallographic point subgroup needs at most three generators.
+    """
     from itertools import combinations
 
     yield ()
@@ -2043,25 +2087,23 @@ def _iter_commuting_pg_subsets(extra_ops, max_rank=3, tol=1e-6):
                 yield subset
 
 
-def _spatial_signs_to_spinorbital_generators(sign_matrix, active_indices_0):
+def _spatial_signs_to_spinorbital_generators(sign_matrix):
     """Lift per-spatial-MO +/-1 signs to interleaved spin-orbital generators."""
     if sign_matrix is None or sign_matrix.size == 0:
         return []
-    # Normalise to a list so tuples are treated as row selections rather than
-    # NumPy multi-axis indexing tuples.
-    active_signs = np.asarray(sign_matrix)[list(active_indices_0)]
+    active_signs = np.asarray(sign_matrix)
     gens = []
     for k in range(active_signs.shape[1]):
-        vec = np.empty(2 * len(active_indices_0), dtype=int)
+        vec = np.empty(2 * active_signs.shape[0], dtype=int)
         vec[0::2] = active_signs[:, k]
         vec[1::2] = active_signs[:, k]
         gens.append(vec)
     return gens
 
 
-def _active_independent_spatial_indices(sign_matrix, active_indices_0):
+def _active_independent_spatial_indices(sign_matrix):
     """Indices of spatial columns independent after adding spin parities."""
-    n_so = 2 * len(active_indices_0)
+    n_so = 2 * np.asarray(sign_matrix).shape[0]
     spin_gens, _ = spin_parity_generators(n_so)
     existing = np.asarray(
         [(np.asarray(g) < 0).astype(np.uint8) for g in spin_gens],
@@ -2069,8 +2111,7 @@ def _active_independent_spatial_indices(sign_matrix, active_indices_0):
     )
     rank = _gf2_rank(existing)
     chosen = []
-    for k, gen in enumerate(_spatial_signs_to_spinorbital_generators(
-            sign_matrix, active_indices_0)):
+    for k, gen in enumerate(_spatial_signs_to_spinorbital_generators(sign_matrix)):
         row = (np.asarray(gen) < 0).astype(np.uint8)
         stacked = np.vstack([existing, row[None, :]])
         new_rank = _gf2_rank(stacked)
@@ -2081,11 +2122,9 @@ def _active_independent_spatial_indices(sign_matrix, active_indices_0):
     return chosen
 
 
-def _score_periodic_signs(sign_matrix, active_indices_0):
+def _score_periodic_signs(sign_matrix):
     """GF(2) rank of spatial signs plus the two fixed spin parities."""
-    return 2 + len(_active_independent_spatial_indices(
-        sign_matrix, active_indices_0
-    ))
+    return 2 + len(_active_independent_spatial_indices(sign_matrix))
 
 
 def _axis_aligned_label_score(labels):
@@ -2096,54 +2135,70 @@ def _axis_aligned_label_score(labels):
     return sum(lbl in preferred for lbl in labels)
 
 
-def _select_max_rank_periodic_plan(mo_coeff, mo_energy, S, extra_ops,
-                                   T_ao_primitives, even_axes,
-                                   active_indices_0, energy_tol=5e-3,
-                                   commute_tol=1e-6):
+def _select_max_rank_periodic_plan(mo_coeff, mo_energy, mo_occ, S,
+                                   extra_candidates, translation_candidates,
+                                   active_indices_0, core_indices_0,
+                                   energy_tol=5e-3, commute_tol=1e-6,
+                                   restriction_tol=1e-5):
     """Select the maximal commuting periodic Z2 plan on the active space.
 
     Algorithm
     ---------
-    1. Enumerate every commuting crystal point-group subset up to Boolean rank
-       three (the maximum point-group rank in 3D).
-    2. For each PG subset, construct the full GF(2) basis of half-translations
-       that commute with it.
-    3. Simultaneously diagonalise that candidate operator set within the
-       energy-degenerate MO blocks.
+    1. Restrict finite space-group candidates to the active space and retain
+       distinct real involutions.
+    2. Enumerate every commuting nontranslation subset up to quotient rank
+       three and add all compatible active involutory translations.
+    3. Simultaneously diagonalise that candidate set within active
+       energy/occupation blocks.
     4. Score the resulting active-space generator matrix together with the two
        spin parities and keep the candidate with the largest GF(2) rank.
 
-    The returned spatial operators are already reduced to a full-space
-    independent basis by ``_refine_blocks_with_extra_ops``; active-space
-    dependencies are removed later when the final generator list is emitted.
+    Dependencies on the two spin parities are removed when the final generator
+    list is emitted.
     """
     best = None
-    blocks = _energy_blocks(mo_energy, energy_tol)
+    active_indices_0 = list(active_indices_0)
+    core_indices_0 = list(core_indices_0)
+    C_active = mo_coeff[:, active_indices_0]
+    C_core = mo_coeff[:, core_indices_0]
+    active_occ_local = [i for i, p in enumerate(active_indices_0)
+                        if float(mo_occ[p]) > 0.5]
+    C_active_occ = C_active[:, active_occ_local]
+    active_energy = np.asarray(mo_energy)[active_indices_0]
+    active_occ = np.asarray(mo_occ)[active_indices_0]
+    blocks = _energy_blocks(active_energy, energy_tol, mo_occ=active_occ)
+
+    translation_ops, seen_actions = _restricted_active_involutions(
+        translation_candidates, C_active, C_core, C_active_occ, S,
+        tol=restriction_tol,
+    )
+    extra_ops, _ = _restricted_active_involutions(
+        extra_candidates, C_active, C_core, C_active_occ, S,
+        tol=restriction_tol, seen_actions=seen_actions,
+    )
 
     for pg_subset in _iter_commuting_pg_subsets(extra_ops, tol=commute_tol):
-        trans_basis = _translation_basis_commuting_with_ops(
-            T_ao_primitives, pg_subset, tol=commute_tol
+        compatible_translations = _translations_commuting_with_ops(
+            translation_ops, pg_subset, tol=commute_tol
         )
-        candidate_ops = [
-            (f"T_({'+'.join(f'a{even_axes[i]}' for i in combo)})/2", T)
-            for combo, T in trans_basis
-        ] + list(pg_subset)
+        candidate_ops = compatible_translations + list(pg_subset)
 
-        coeff, _refined_blocks, accepted = _refine_blocks_with_extra_ops(
-            mo_coeff, S, candidate_ops, blocks,
+        active_coeff, _refined_blocks, accepted = _refine_blocks_with_extra_ops(
+            C_active, candidate_ops, blocks,
         )
+        coeff = mo_coeff.copy()
+        coeff[:, active_indices_0] = active_coeff
         labels = [lbl for lbl, _ in accepted]
         sign_matrix = (
             np.stack([sv for _, sv in accepted], axis=1)
-            if accepted else np.zeros((mo_coeff.shape[1], 0), dtype=int)
+            if accepted else np.zeros((len(active_indices_0), 0), dtype=int)
         )
-        total_rank = _score_periodic_signs(sign_matrix, active_indices_0)
+        total_rank = _score_periodic_signs(sign_matrix)
         active_spatial_rank = total_rank - 2
-        active_cols = _active_independent_spatial_indices(
-            sign_matrix, active_indices_0
-        )
+        active_cols = _active_independent_spatial_indices(sign_matrix)
         active_labels = [labels[k] for k in active_cols]
-        n_trans = sum(lbl.startswith('T_(') for lbl in active_labels)
+        n_trans = sum(lbl.startswith('T[') and '.' not in lbl
+                      for lbl in active_labels)
         # Tie-break only after the physically relevant total rank:
         #   1. more independent spatial generators on the active space,
         #   2. more explicit periodic translations,
@@ -2164,10 +2219,8 @@ def _select_max_rank_periodic_plan(mo_coeff, mo_energy, S, extra_ops,
                 active_labels=active_labels,
                 sign_matrix=sign_matrix,
                 pg_labels=[lbl for lbl, _ in pg_subset],
-                translation_labels=[
-                    f"T_({'+'.join(f'a{even_axes[i]}' for i in combo)})/2"
-                    for combo, _ in trans_basis
-                ],
+                translation_labels=[lbl for lbl, _
+                                    in compatible_translations],
                 total_rank=total_rank,
                 spatial_rank=active_spatial_rank,
             )
@@ -2178,19 +2231,18 @@ def _select_max_rank_periodic_plan(mo_coeff, mo_energy, S, extra_ops,
 
 
 def _append_spatial_sign_generators(gens, signs, labels, sign_matrix,
-                                    op_labels, active_indices_0, n_so,
-                                    mo_occ=None):
+                                    op_labels, n_so, mo_occ=None):
     """Append GF(2)-independent spatial +/-1 generators to an existing set."""
     if sign_matrix is None or len(op_labels) == 0:
         return
-    active_signs = sign_matrix[active_indices_0]
+    active_signs = np.asarray(sign_matrix)
     existing_b = (
         np.array([(np.asarray(g) < 0).astype(np.uint8) for g in gens],
                  dtype=np.uint8)
         if gens else np.zeros((0, n_so), dtype=np.uint8)
     )
     base_rank = _gf2_rank(existing_b) if existing_b.size else 0
-    mo_occ_active = None if mo_occ is None else np.asarray(mo_occ)[active_indices_0]
+    mo_occ_active = None if mo_occ is None else np.asarray(mo_occ)
     for k_op, lbl in enumerate(op_labels):
         sign_per_mo = active_signs[:, k_op]
         gen_vec = np.empty(n_so, dtype=int)
@@ -2284,10 +2336,10 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
         unoccupied MOs outside the window are dropped.  Symmetry detection
         runs on the active-MO subset only.
     symmetry : bool
-        If True (default), enumerate the primitive-cell crystal-space-group
-        involutions and the available half-supercell translations, then select
-        the commuting spatial subset that maximises the active-space GF(2)
-        rank after the two spin-parity generators are included.  The finite
+        If True (default), enumerate the finite Born--von Karman space group,
+        retain operations whose active-space restrictions are real
+        involutions, and select the commuting subset that maximises the active
+        GF(2) rank after the two spin parities are included.  The finite
         supercell-as-molecule point group is retained only as a diagnostic.
 
         If False, only spin parities and the explicit half-translation
@@ -2361,9 +2413,13 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
 
     S = mf_sc.get_ovlp()
     if np.iscomplexobj(S):
+        if np.max(np.abs(S.imag)) > 1e-9:
+            raise RuntimeError("Folded AO overlap has a non-trivial imaginary part")
         S = S.real
     mo_coeff = np.asarray(mf_sc.mo_coeff)
-    if mo_coeff.dtype != float:
+    if np.iscomplexobj(mo_coeff):
+        if np.max(np.abs(mo_coeff.imag)) > 1e-9:
+            raise RuntimeError("Folded MO coefficients have a non-trivial imaginary part")
         mo_coeff = mo_coeff.real
     mo_energy = np.asarray(mf_sc.mo_energy).real
     requested_active_indices_0 = (
@@ -2372,62 +2428,71 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
         else sorted(int(i) - 1 for i in active_mos)
     )
 
-    # Primitive half-supercell translations available on even mesh axes.  The
-    # planner below will form whatever GF(2) combinations are compatible with
-    # each candidate crystal-PG subgroup.
-    even_axes = [i for i, m in enumerate(kpts_mesh)
-                 if int(m) % 2 == 0 and int(m) >= 2]
-    T_ao_primitives = []
+    # Enumerate the finite Born--von Karman translations.  Higher-order
+    # translations are retained as candidates because their restriction to a
+    # selected active space can have order two.
     prim_a = np.asarray(cell.a, dtype=float)
     if cell.unit.lower().startswith('b'):
         prim_a_bohr = prim_a
     else:
         prim_a_bohr = prim_a / 0.52917720859
-    for ax in even_axes:
-        n_ax = int(kpts_mesh[ax])
-        # Half of the supercell period along axis ax: shift by (n_ax // 2)
-        # primitive lattice vectors.  For n_ax=2 this equals one primitive
-        # lattice vector (preserving the original behaviour); for n_ax=4
-        # it is two primitive vectors; etc.
-        half_shift = (n_ax // 2) * prim_a_bohr[ax]
-        atom_perm = _atom_permutation_under_translation(
-            mf_sc.cell, half_shift
-        )
-        T_ao_primitives.append(_ao_translation_matrix(mf_sc.cell, atom_perm))
+    all_translations = _bvk_translation_ops(
+        mf_sc.cell, prim_a_bohr, kpts_mesh
+    )
 
-    # Enumerate the true crystal-space-group involutions.  These, together with
-    # the half-translations, are the sole spatial candidates used by the
-    # periodic planner.
-    try:
-        _stage('enumerate crystal space-group involutions')
-        extra_ops = _extra_supercell_pg_ops(cell, mf_sc, S)
-        _stage(f'  -> {len(extra_ops)} candidate involution(s) close on supercell')
-    except Exception as _e:
-        extra_ops = []
-        _stage(f'  crystal space-group enumeration skipped: {_e!r}')
+    # Build one representative of every compatible primitive-cell coset, then
+    # combine it with every finite translation.  The active-space restriction
+    # below, rather than the order of the full operation, decides whether it is
+    # a Boolean involution.
+    _stage('enumerate finite crystal space-group candidates')
+    space_group_reps = _extra_supercell_pg_ops(cell, mf_sc, S)
+    fractional_translations = _translated_space_group_ops(
+        all_translations, space_group_reps, translations=True
+    )
+    translation_candidates = itertools.chain(
+        all_translations[1:], fractional_translations
+    )
+    extra_candidates = _translated_space_group_ops(
+        all_translations, space_group_reps
+    )
+    n_nontranslation_reps = sum(not is_translation
+                                for _, _, is_translation in space_group_reps)
+    _stage(
+        f'  -> {n_nontranslation_reps * len(all_translations)} '
+        'finite nontranslation candidate(s)'
+    )
+
+    mo_occ = np.asarray(mf_sc.mo_occ)
+    active_set = set(requested_active_indices_0)
+    core_indices_0 = [i for i, occ in enumerate(mo_occ)
+                      if i not in active_set and float(occ) > 1.5]
 
     _stage('select maximal periodic symmetry plan')
     plan = _select_max_rank_periodic_plan(
-        mo_coeff, mo_energy, S, extra_ops, T_ao_primitives, even_axes,
-        requested_active_indices_0, energy_tol=symm_energy_tol,
+        mo_coeff, mo_energy, mo_occ, S, extra_candidates,
+        translation_candidates, requested_active_indices_0, core_indices_0,
+        energy_tol=symm_energy_tol,
     )
     new_mo_coeff = plan['mo_coeff']
     spatial_op_labels = plan['labels']
     spatial_signs_per_mo = plan['sign_matrix']
     active_spatial_cols = _active_independent_spatial_indices(
-        spatial_signs_per_mo, requested_active_indices_0
+        spatial_signs_per_mo
     )
     active_spatial_labels = [spatial_op_labels[k] for k in active_spatial_cols]
     active_spatial_signs = (
-        spatial_signs_per_mo[np.ix_(requested_active_indices_0, active_spatial_cols)]
+        spatial_signs_per_mo[:, active_spatial_cols]
         if active_spatial_cols
         else np.zeros((len(requested_active_indices_0), 0), dtype=int)
     )
-    label_orb_symm = [
+    active_label_orb_symm = [
         str(tuple(int(spatial_signs_per_mo[j, k])
                   for k in range(spatial_signs_per_mo.shape[1])))
-        for j in range(new_mo_coeff.shape[1])
+        for j in range(len(requested_active_indices_0))
     ]
+    full_label_orb_symm = [None] * new_mo_coeff.shape[1]
+    for local, full in enumerate(requested_active_indices_0):
+        full_label_orb_symm[full] = active_label_orb_symm[local]
     _stage(
         '  -> rank %d = 2 spin + %d spatial; active basis %s'
         % (plan['total_rank'], plan['spatial_rank'], plan['active_labels'])
@@ -2440,7 +2505,6 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
         H = _fermion_hamiltonian_in_mo_basis(mf_sc, new_mo_coeff, kmf=kmf)
         n_mo = new_mo_coeff.shape[1]
         n_so = 2 * n_mo
-        active_label_orb_symm = label_orb_symm
         nelec_up_eff = nelec_up
         nelec_dn_eff = nelec_dn
         e_core = 0.0
@@ -2474,7 +2538,6 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
         H = H + _active_space_number_penalty(
             n_mo, nelec_up_eff, nelec_dn_eff, strength=2.0
         )
-        active_label_orb_symm = [label_orb_symm[i] for i in active_indices_0]
 
     _stage('build maximal active-space generator set')
     gens, _spin_labels = spin_parity_generators(n_so)
@@ -2485,7 +2548,7 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
     ]
     _append_spatial_sign_generators(
         gens, signs, labels, spatial_signs_per_mo, spatial_op_labels,
-        active_indices_0, n_so, mo_occ=np.asarray(mf_sc.mo_occ),
+        n_so, mo_occ=mo_occ[active_indices_0],
     )
     irrep = None
     if len(labels) != plan['total_rank']:
@@ -2517,7 +2580,7 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
         _kmf=kmf, _mf_sc=mf_sc, _mol_sc=mol_sc,
         _n_k=n_k, _n_bands=n_bands,
         _label_orb_symm=active_label_orb_symm, _irrep=irrep,
-        _full_label_orb_symm=label_orb_symm,
+        _full_label_orb_symm=full_label_orb_symm,
         _active_indices_0=active_indices_0,
         _e_core=e_core,
         _new_mo_coeff=new_mo_coeff,

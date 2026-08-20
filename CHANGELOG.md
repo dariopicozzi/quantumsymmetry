@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+- Find periodic Boolean symmetries from the finite Born–von Kármán
+  space-group action restricted to the selected active orbitals, including
+  operations that become commuting involutions only after restriction.
+
 ## 0.3.1
 
 - Fix periodic Gamma folding on larger even k-point meshes by using the
