@@ -5,7 +5,10 @@
 # are intentionally not exercised here: they are too slow for unit tests
 # and are covered by the CAS/crystals/ benchmarks.
 
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
 from numpy import isclose
 from numpy.linalg import eigvalsh
 from openfermion import FermionOperator, QubitOperator, jordan_wigner
@@ -16,10 +19,14 @@ from ..quantumsymmetry.periodic import (
     _iter_commuting_pg_subsets,
     _restricted_active_involutions,
     _select_max_rank_periodic_plan,
+    _static_crpa_downfold,
+    _supercell_mo_eri,
     _supercell_mo_to_kpt_mo,
     _translated_space_group_ops,
     build_cell,
+    build_periodic_inputs,
     fold_to_supercell,
+    run_krhf,
     spin_parity_generators,
     half_translation_generators,
 )
@@ -138,6 +145,106 @@ def test_active_periodic_planner_uses_restricted_boolean_image():
     )
     assert plan['total_rank'] == 4
     assert set(plan['active_labels']) == {'T', 'g'}
+
+
+def test_crpa_requires_a_valid_active_space_request():
+    """Invalid cRPA requests fail before an electronic-structure run."""
+    with pytest.raises(ValueError, match="None or 'crpa'"):
+        build_periodic_inputs(None, None, None, None, downfolding='unknown')
+    with pytest.raises(ValueError, match='requires active_mos'):
+        build_periodic_inputs(None, None, None, None, downfolding='crpa')
+
+
+def test_crpa_full_active_space_is_exact_identity():
+    """With no rest transitions, cRPA is exactly the current bare CAS."""
+    mf = SimpleNamespace(
+        mo_occ=np.array([2.0, 0.0]),
+        # The excluded active transition may even be gapless: it must never
+        # enter the rest-space response or its energy denominator.
+        mo_energy=np.array([0.0, 0.0]),
+    )
+    h1 = np.array([[0.3, 0.04], [0.04, 0.8]])
+    eri = np.arange(16, dtype=float).reshape(2, 2, 2, 2) / 20.0
+    e0 = -1.25
+
+    e_eff, h_eff, u_eff = _static_crpa_downfold(
+        mf, np.eye(2), [0, 1], e0, h1, eri
+    )
+    assert e_eff == e0
+    assert np.array_equal(h_eff, h1)
+    assert np.array_equal(u_eff, eri)
+
+
+def test_crpa_screening_preserves_hf_reference():
+    """A real periodic GDF response screens U without moving the HF anchor."""
+    basis = {'H': [[0, [1.2, 1.0]], [0, [0.3, 1.0]]]}
+    cell = build_cell(
+        atom=[['H', (0.0, 0.0, 0.0)], ['H', (0.7414, 0.0, 0.0)]],
+        a=np.diag([3.0, 8.0, 8.0]), basis=basis,
+        kpts_mesh=(1, 1, 1),
+    )
+    kmf, _ = run_krhf(cell, (1, 1, 1), df='FFTDF', exxdiv='ewald')
+    assert kmf.converged
+    mf_sc, _order, _n_k, _n_bands = fold_to_supercell(kmf, (1, 1, 1))
+
+    # One occupied and one virtual target orbital; two higher virtuals form
+    # the rest space and therefore provide a non-zero screening channel.
+    active = [0, 1]
+    coeff = np.asarray(mf_sc.mo_coeff).real
+    bare = _supercell_mo_eri(mf_sc, coeff[:, active])
+    h1 = np.array([[0.3, 0.02], [0.02, 0.6]])
+    e0 = 1.2
+    e_eff, h_eff, screened = _static_crpa_downfold(
+        mf_sc, coeff, active, e0, h1, bare
+    )
+
+    gamma = np.diag(np.asarray(mf_sc.mo_occ)[active])
+
+    def rhf_field(eri):
+        j = np.einsum('pqrs,rs->pq', eri, gamma, optimize=True)
+        k = np.einsum('prqs,rs->pq', eri, gamma, optimize=True)
+        return j - 0.5 * k
+
+    delta = screened - bare
+    delta_pair_matrix = delta.reshape(4, 4)
+    assert np.linalg.norm(delta) > 1e-6
+    # Static screening lowers the Coulomb metric in every active-pair
+    # direction (up to numerical roundoff).
+    assert np.linalg.eigvalsh(delta_pair_matrix).max() < 1e-9
+
+    fock_bare = h1 + rhf_field(bare)
+    fock_eff = h_eff + rhf_field(screened)
+    assert np.allclose(fock_eff, fock_bare, atol=1e-10)
+
+    energy_bare = (
+        e0 + np.einsum('pq,qp->', gamma, h1)
+        + 0.5 * np.einsum('pq,qp->', gamma, rhf_field(bare))
+    )
+    energy_eff = (
+        e_eff + np.einsum('pq,qp->', gamma, h_eff)
+        + 0.5 * np.einsum('pq,qp->', gamma, rhf_field(screened))
+    )
+    assert isclose(energy_eff, energy_bare, atol=1e-10)
+    assert np.allclose(screened, screened.transpose(1, 0, 2, 3), atol=1e-10)
+    assert np.allclose(screened, screened.transpose(0, 1, 3, 2), atol=1e-10)
+    assert np.allclose(screened, screened.transpose(2, 3, 0, 1), atol=1e-10)
+
+
+def test_periodic_crpa_public_api_builds_reducible_hamiltonian():
+    """The single public option reaches cRPA and preserves SAE reduction."""
+    basis = {'H': [[0, [1.2, 1.0]], [0, [0.3, 1.0]]]}
+    enc = PeriodicEncoding(
+        atom=[['H', (0.0, 0.0, 0.0)], ['H', (0.7414, 0.0, 0.0)]],
+        a=np.diag([3.0, 8.0, 8.0]), basis=basis, kpts=(1, 1, 1),
+        active_mos=[1, 2], downfolding='crpa',
+    )
+    n_red = enc.nspinorbital - len(enc.target_qubits)
+    e_ref = _sector_lowest(
+        enc.fermion_hamiltonian, enc.nspinorbital,
+        enc.symmetry_generators, enc.signs,
+    )
+    e_red = _reduced_lowest(enc.hamiltonian, n_red)
+    assert isclose(e_red, e_ref, atol=1e-9)
 
 
 # ---------------------------------------------------------------------------

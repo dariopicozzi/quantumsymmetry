@@ -1394,12 +1394,141 @@ def _fermion_hamiltonian_in_mo_basis(mf_sc, mo_coeff, kmf=None):
     return H
 
 
+def _static_crpa_downfold(mf_sc, mo_coeff, active_indices_0,
+                          e0, h1_act, eri_act):
+    """Return the static cRPA active-space tensors ``(E0, h1, U)``.
+
+    The rest-space independent-particle polarisation excludes only
+    occupied-to-virtual transitions whose two orbitals both belong to the
+    active space.  Screening is evaluated in a Gamma-point periodic GDF
+    auxiliary basis.  Only the GDF *screening correction* is added to the
+    existing bare ERI tensor, so the current CAS Hamiltonian is recovered
+    exactly when the rest-space polarisation vanishes.
+
+    Replacing ``v`` by ``U = v + dU`` changes the active Hartree--Fock field.
+    The accompanying one-body and scalar corrections
+
+        h1 -> h1 - G_dU[gamma]
+        E0 -> E0 + 1/2 Tr(gamma G_dU[gamma])
+
+    preserve the parent restricted-HF Fock block and reference energy.
+    """
+    from pyscf.ao2mo import _ao2mo
+    from pyscf.pbc import df as pbcdf
+
+    mo_coeff = np.asarray(mo_coeff)
+    mo_occ = np.asarray(mf_sc.mo_occ, dtype=float)
+    mo_energy = np.asarray(mf_sc.mo_energy, dtype=float)
+    active = np.asarray(sorted(int(i) for i in active_indices_0), dtype=int)
+
+    if mo_coeff.ndim != 2 or mo_coeff.shape[1] != mo_occ.size:
+        raise ValueError("cRPA received inconsistent MO coefficients/occupations")
+    if np.iscomplexobj(mo_coeff):
+        if np.max(np.abs(mo_coeff.imag)) > 1e-9:
+            raise NotImplementedError("cRPA currently requires real Gamma-point MOs")
+        mo_coeff = mo_coeff.real
+    if np.any(active < 0) or np.any(active >= mo_occ.size):
+        raise ValueError("cRPA active-orbital index out of range")
+
+    occ = np.flatnonzero(mo_occ > 1e-8)
+    vir = np.flatnonzero(mo_occ <= 1e-8)
+    if occ.size == 0 or vir.size == 0:
+        return float(e0), np.array(h1_act, copy=True), np.array(eri_act, copy=True)
+    if not np.allclose(mo_occ[occ], 2.0, atol=1e-8, rtol=0.0):
+        raise NotImplementedError(
+            "static cRPA currently supports closed-shell integer occupations"
+        )
+
+    active_mask = np.zeros(mo_occ.size, dtype=bool)
+    active_mask[active] = True
+    active_active = active_mask[occ, None] & active_mask[None, vir]
+    rest_transitions = ~active_active
+    if not np.any(rest_transitions):
+        # Full active space: Pi_r = 0, so downfolding must be the identity.
+        return float(e0), np.array(h1_act, copy=True), np.array(eri_act, copy=True)
+
+    gaps = mo_energy[vir][None, :] - mo_energy[occ][:, None]
+    rest_gaps = gaps[rest_transitions]
+    if np.min(rest_gaps) <= 1e-8:
+        raise ValueError("static cRPA requires a positive occupied-virtual gap")
+
+    response_coeff = np.asarray(mf_sc.mo_coeff)
+    if response_coeff.shape != mo_coeff.shape:
+        raise ValueError("cRPA received inconsistent canonical MO coefficients")
+    if np.iscomplexobj(response_coeff):
+        if np.max(np.abs(response_coeff.imag)) > 1e-9:
+            raise NotImplementedError("cRPA currently requires real Gamma-point MOs")
+        response_coeff = response_coeff.real
+
+    cell = mf_sc.cell
+    gdf = pbcdf.GDF(cell, np.zeros((1, 3)))
+    gdf.verbose = getattr(mf_sc, 'verbose', 0)
+    gdf.max_memory = getattr(mf_sc, 'max_memory', gdf.max_memory)
+    naux = int(gdf.get_naoaux())
+
+    nocc = occ.size
+    nvir = vir.size
+    nact = active.size
+    # The independent-particle response must use the canonical orbitals whose
+    # eigenvalues appear in the denominators.  ``mo_coeff`` may contain the
+    # subsequent symmetry rotations inside an active near-degenerate block;
+    # it is used only for the final active-pair interaction tensor.
+    mo_ov = np.asarray(
+        np.hstack((response_coeff[:, occ], response_coeff[:, vir])), order='F'
+    )
+    mo_act = np.asarray(mo_coeff[:, active], order='F')
+    L_ov = np.empty((nocc * nvir, naux), dtype=float)
+    L_act = np.empty((nact * nact, naux), dtype=float)
+
+    p1 = 0
+    for Lpq in gdf.loop():
+        p0, p1 = p1, p1 + Lpq.shape[0]
+        L_ov[:, p0:p1] = _ao2mo.nr_e2(
+            Lpq, mo_ov, (0, nocc, nocc, nocc + nvir), aosym='s2'
+        ).T
+        L_act[:, p0:p1] = _ao2mo.nr_e2(
+            Lpq, mo_act, (0, nact, 0, nact), aosym='s2'
+        ).T
+    if p1 != naux:
+        raise RuntimeError(
+            f"cRPA GDF auxiliary-size mismatch: transformed {p1}, expected {naux}"
+        )
+
+    # PySCF's closed-shell direct-RPA static response is 4/(eps_i-eps_a).
+    chi_matrix = np.zeros_like(gaps)
+    chi_matrix[rest_transitions] = -4.0 / rest_gaps
+    chi = chi_matrix.ravel()
+    polarisation = (L_ov.T * chi) @ L_ov
+    polarisation = 0.5 * (polarisation + polarisation.T)
+    dielectric = np.eye(naux) - polarisation
+
+    screened_pairs = L_act @ np.linalg.solve(dielectric, L_act.T)
+    bare_df_pairs = L_act @ L_act.T
+    delta_pairs = screened_pairs - bare_df_pairs
+    delta_pairs = 0.5 * (delta_pairs + delta_pairs.T)
+    delta_u = delta_pairs.reshape(nact, nact, nact, nact)
+
+    eri_eff = np.asarray(eri_act, dtype=float) + delta_u
+    gamma = np.diag(mo_occ[active])
+    delta_j = np.einsum('pqrs,rs->pq', delta_u, gamma, optimize=True)
+    delta_k = np.einsum('prqs,rs->pq', delta_u, gamma, optimize=True)
+    delta_fock = delta_j - 0.5 * delta_k
+    delta_fock = 0.5 * (delta_fock + delta_fock.T)
+
+    h1_eff = np.asarray(h1_act, dtype=float) - delta_fock
+    e0_eff = float(e0) + 0.5 * float(
+        np.einsum('pq,qp->', gamma, delta_fock, optimize=True)
+    )
+    return e0_eff, h1_eff, eri_eff
+
+
 def _active_space_fermion_hamiltonian(mf_sc, mo_coeff, active_indices_0,
                                        kmf=None, integral_backend='kpts',
                                        symmetry_signs=None,
                                        symmetry_labels=None,
                                        enforce_symmetry=True,
-                                       symmetry_leak_tol=1e-10):
+                                       symmetry_leak_tol=1e-10,
+                                       downfolding=None):
     """Build the active-space FermionOperator using periodic ERIs and the
     standard frozen-core mean-field correction to ``h1``.
 
@@ -1640,6 +1769,11 @@ def _active_space_fermion_hamiltonian(mf_sc, mo_coeff, active_indices_0,
     else:
         e_core = 0.0
     e_core += float(mf_sc.energy_nuc())
+
+    if downfolding == 'crpa':
+        e_core, h1_act, eri_act = _static_crpa_downfold(
+            mf_sc, mo_coeff, active_sorted, e_core, h1_act, eri_act
+        )
 
     if symmetry_signs is not None:
         if enforce_symmetry:
@@ -2319,7 +2453,8 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
                           symm_energy_tol=5e-3, symm_purity_tol=0.95,
                           active_mos=None, integral_backend='kpts',
                           enforce_symmetry=True,
-                          symmetry_leak_tol=1e-10):
+                          symmetry_leak_tol=1e-10,
+                          downfolding=None):
     """End-to-end builder for the periodic-from-PySCF path.
 
     Returns a dict suitable for feeding into ``Encoding(periodic=True, **out)``.
@@ -2356,7 +2491,20 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
     symmetry_leak_tol : float
         Warn when the largest removed symmetry-forbidden coefficient exceeds
         this value in Hartree.
+    downfolding : {None, 'crpa'}
+        Optional static constrained-RPA downfolding of the active-space
+        Hamiltonian.  Requires ``active_mos``.  ``None`` preserves the bare
+        CAS construction.
     """
+    if downfolding is not None:
+        if not isinstance(downfolding, str) or downfolding.lower() != 'crpa':
+            raise ValueError("downfolding must be None or 'crpa'")
+        downfolding = 'crpa'
+        if active_mos is None:
+            raise ValueError("downfolding='crpa' requires active_mos")
+        if not symmetry:
+            raise ValueError("downfolding='crpa' requires symmetry=True")
+
     import time as _time
     _t0 = _time.time()
     def _stage(msg):
@@ -2521,7 +2669,8 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
                                               symmetry_signs=active_spatial_signs,
                                               symmetry_labels=active_spatial_labels,
                                               enforce_symmetry=enforce_symmetry,
-                                              symmetry_leak_tol=symmetry_leak_tol)
+                                              symmetry_leak_tol=symmetry_leak_tol,
+                                              downfolding=downfolding)
         )
         n_so = 2 * n_mo
         # Active-window electron count and (Sz, parity).

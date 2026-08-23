@@ -590,7 +590,8 @@ class PeriodicEncoding():
                  symmetry_generator_labels=None,
                  # Common
                  name='crystal', bravyi_kitaev=False,
-                 output_format='openfermion'):
+                 output_format='openfermion',
+                 downfolding=None):
         self.name = name
         self.bravyi_kitaev = bool(bravyi_kitaev)
         self._bk_tableau_cache = {}
@@ -621,6 +622,7 @@ class PeriodicEncoding():
                 integral_backend=integral_backend,
                 enforce_symmetry=enforce_symmetry,
                 symmetry_leak_tol=symmetry_leak_tol,
+                downfolding=downfolding,
             )
             self._pyscf_periodic = pyscf_inputs
             kw = {k: v for k, v in pyscf_inputs.items() if not k.startswith('_')}
@@ -635,6 +637,10 @@ class PeriodicEncoding():
             )
         else:
             # ---- BYO-Hamiltonian path ----
+            if downfolding is not None:
+                raise ValueError(
+                    "downfolding requires the PySCF-driven periodic path"
+                )
             self._setup(
                 fermion_hamiltonian=fermion_hamiltonian,
                 nspinorbital=nspinorbital,

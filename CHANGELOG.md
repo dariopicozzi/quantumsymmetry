@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3
+
+- Add optional static constrained-RPA downfolding for periodic active-space
+  Hamiltonians through `PeriodicEncoding(..., downfolding="crpa")`.
+
 ## 0.3.2
 
 - Find periodic Boolean symmetries from the finite Born–von Kármán
