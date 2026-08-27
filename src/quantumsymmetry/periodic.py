@@ -684,8 +684,7 @@ def supercell_fermion_hamiltonian(mf_sc, band_k_order, n_k, n_bands):
     # total energy includes a per-electron Madelung shift
     #     E_HF^{ewald} = E_HF^{raw} - (1/2) * N_e * xi_M.
     # We encode this as the operator -(xi_M / 2) * sum_p n_p so that the
-    # FermionOperator agrees with kmf.e_tot in *every* particle-number
-    # sector (and the global GS does not collapse onto the vacuum).
+    # FermionOperator carries the same per-electron convention as kmf.e_tot.
     if getattr(mf_sc, 'exxdiv', None) == 'ewald' and mol.dimension > 0:
         from pyscf.pbc.tools import madelung as _madelung
         xi_M = float(_madelung(mol, np.zeros((1, 3))))
@@ -1795,33 +1794,6 @@ def _active_space_fermion_hamiltonian(mf_sc, mo_coeff, active_indices_0,
     return H, n_act, nelec_in_active, e_core, active_sorted, leakage_report
 
 
-def _active_space_number_penalty(n_act, n_up_target, n_dn_target, strength=2.0):
-    """FermionOperator for ``strength*(N_up - t_up)^2 + strength*(N_dn - t_dn)^2``.
-
-    Expanding (N - t)^2 = (1-2t)*N + 2*sum_{p<q} n_p*n_q + t^2, using the
-    fermion idempotency n_p^2 = n_p and the identity
-    n_i*n_j = a†_i a†_j a_j a_i  (i < j, different spin-orbital indices).
-
-    The penalty is zero for the target (n_up_target, n_dn_target) particle
-    sector and positive everywhere else, making the physical ground state the
-    minimum of the qubit Hamiltonian.  In periodic active-space calculations
-    the frozen-core Coulomb field can make h1_act diagonal positive, which
-    would otherwise let the vacuum (0 active electrons) be the minimum.
-    """
-    from openfermion import FermionOperator
-    const = strength * float(n_up_target ** 2 + n_dn_target ** 2)
-    pen = FermionOperator('', const)
-    for p in range(n_act):
-        pu, pd = 2 * p, 2 * p + 1
-        pen += FermionOperator(f'{pu}^ {pu}', strength * (1.0 - 2 * n_up_target))
-        pen += FermionOperator(f'{pd}^ {pd}', strength * (1.0 - 2 * n_dn_target))
-        for q in range(p + 1, n_act):
-            qu, qd = 2 * q, 2 * q + 1
-            pen += FermionOperator(((pu, 1), (qu, 1), (qu, 0), (pu, 0)), 2 * strength)
-            pen += FermionOperator(((pd, 1), (qd, 1), (qd, 0), (pd, 0)), 2 * strength)
-    return pen
-
-
 # ---------------------------------------------------------------------------
 # Crystal-space-group Z2 generators for the periodic planner
 # ---------------------------------------------------------------------------
@@ -2678,15 +2650,6 @@ def build_periodic_inputs(atom, a, basis, kpts_mesh, pseudo=None,
         # closed-shell by construction).
         nelec_up_eff = (nelec_in_active + spin) // 2
         nelec_dn_eff = (nelec_in_active - spin) // 2
-        # In periodic active-space calculations the frozen-core Coulomb field
-        # can make the h1_act diagonal positive, so the vacuum (0 active
-        # electrons) has lower energy than the physical ground state.  Adding
-        # this penalty ensures the physical (nelec_up_eff, nelec_dn_eff) sector
-        # is the minimum of the qubit Hamiltonian (penalty = 0 there, positive
-        # everywhere else), without changing any eigenvalue in that sector.
-        H = H + _active_space_number_penalty(
-            n_mo, nelec_up_eff, nelec_dn_eff, strength=2.0
-        )
 
     _stage('build maximal active-space generator set')
     gens, _spin_labels = spin_parity_generators(n_so)

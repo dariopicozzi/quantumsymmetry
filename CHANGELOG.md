@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.4
+
+- Return bare periodic active-space Hamiltonians without adding an automatic
+  particle-number penalty. Fixed-particle-number calculations should use an
+  eigensolver restricted to the physical sector or initialize a
+  number-conserving ansatz in that sector.
+
 ## 0.3.3
 
 - Add optional static constrained-RPA downfolding for periodic active-space
