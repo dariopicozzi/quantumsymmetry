@@ -13,6 +13,9 @@ from numpy import isclose
 from numpy.linalg import eigvalsh
 from openfermion import FermionOperator, QubitOperator, jordan_wigner
 from openfermion.linalg import get_sparse_operator
+from qiskit import QuantumCircuit
+from qiskit.primitives import StatevectorEstimator
+from qiskit.quantum_info import SparsePauliOp
 
 from ..quantumsymmetry import PeriodicEncoding
 from ..quantumsymmetry.periodic import (
@@ -317,7 +320,10 @@ def _sector_lowest(fermion_hamiltonian, n_so, generators, signs):
         z_mask = np.array([1 if gen[q] == -1 else 0 for q in range(n_so)], dtype=int)
         eigs = np.empty(dim, dtype=int)
         for x in range(dim):
-            bits = np.array([(x >> q) & 1 for q in range(n_so)], dtype=int)
+            bits = np.array(
+                [(x >> (n_so - 1 - q)) & 1 for q in range(n_so)],
+                dtype=int,
+            )
             eigs[x] = 1 if (int(np.dot(z_mask, bits)) % 2) == 0 else -1
         keep &= (eigs == int(sgn))
     return float(eigvalsh(H[np.ix_(keep, keep)])[0])
@@ -461,11 +467,204 @@ def test_periodic_apply_number_operator():
     keep = np.ones(dim, dtype=bool)
     for gen, sgn in zip(gens, signs):
         z_mask = np.array([1 if gen[q] == -1 else 0 for q in range(n_so)], dtype=int)
-        eigs = np.array([1 if (int(np.dot(z_mask, np.array([(x >> q) & 1 for q in range(n_so)]))) % 2) == 0
-                         else -1 for x in range(dim)], dtype=int)
+        eigs = np.array([
+            1 if (
+                int(np.dot(z_mask, np.array([
+                    (x >> (n_so - 1 - q)) & 1 for q in range(n_so)
+                ]))) % 2
+            ) == 0 else -1
+            for x in range(dim)
+        ], dtype=int)
         keep &= (eigs == int(sgn))
     val_ref = float(eigvalsh(H_n[np.ix_(keep, keep)])[0])
     assert isclose(val_red, val_ref, atol=1e-10)
+
+
+def test_fixed_spin_orbitals_match_explicit_php_matrix():
+    """Fixed occupations reproduce an independently selected P H P block."""
+    def number(mode):
+        return FermionOperator(((mode, 1), (mode, 0)))
+
+    def hopping(mode_a, mode_b, coefficient):
+        return coefficient * (
+            FermionOperator(((mode_a, 1), (mode_b, 0)))
+            + FermionOperator(((mode_b, 1), (mode_a, 0)))
+        )
+
+    n_spin_orbitals = 6
+    fixed = {0: 1, 5: 0}
+    hamiltonian = 0.17 * FermionOperator(())
+    for mode, coefficient in enumerate((-0.7, -0.2, 0.1, 0.4, 0.6, 0.9)):
+        hamiltonian += coefficient * number(mode)
+    hamiltonian += hopping(1, 3, 0.31)
+    hamiltonian += hopping(2, 4, -0.23)
+    hamiltonian += hopping(0, 2, 0.19)
+    hamiltonian += hopping(5, 3, -0.17)
+    hamiltonian += 0.27 * number(0) * number(1)
+    hamiltonian -= 0.13 * number(0) * number(4)
+    hamiltonian += 0.21 * number(2) * number(5)
+
+    enc = PeriodicEncoding(
+        fermion_hamiltonian=hamiltonian,
+        nspinorbital=n_spin_orbitals,
+        fixed_spin_orbitals=fixed,
+    )
+
+    full_matrix = get_sparse_operator(
+        jordan_wigner(hamiltonian), n_qubits=n_spin_orbitals
+    ).toarray()
+    # OpenFermion orders mode 0 as the most-significant matrix-basis bit.
+    keep = [
+        index
+        for index in range(1 << n_spin_orbitals)
+        if all(
+            ((index >> (n_spin_orbitals - 1 - mode)) & 1) == occupation
+            for mode, occupation in fixed.items()
+        )
+    ]
+    php_matrix = full_matrix[np.ix_(keep, keep)]
+    reduced_matrix = get_sparse_operator(
+        enc.hamiltonian,
+        n_qubits=n_spin_orbitals - len(enc.target_qubits),
+    ).toarray()
+
+    assert np.allclose(reduced_matrix, php_matrix, atol=1e-12)
+    assert enc.fixed_spin_orbitals == fixed
+    assert enc.nspinorbital == n_spin_orbitals
+    assert enc.target_qubits == [0, 5]
+    assert len(enc.target_qubits) == 2
+
+    occupied = enc.apply(FermionOperator('0^ 0'))
+    empty = enc.apply(FermionOperator('5^ 5'))
+    assert occupied == QubitOperator((), 1.0)
+    assert not empty.terms
+
+
+def test_fixed_spin_orbitals_handle_dependent_and_inconsistent_constraints():
+    """Compatible redundant occupations are removed; conflicts are rejected."""
+    parity = np.asarray([-1, -1], dtype=int)
+    hamiltonian = FermionOperator('0^ 0') + FermionOperator('1^ 1')
+    common = dict(
+        fermion_hamiltonian=hamiltonian,
+        nspinorbital=2,
+        nelectron_up=1,
+        nelectron_down=0,
+        symmetry_generators=[parity],
+        signs=[-1],
+    )
+
+    implied = PeriodicEncoding(fixed_spin_orbitals={0: 1}, **common)
+    explicit = PeriodicEncoding(fixed_spin_orbitals={0: 1, 1: 0}, **common)
+    assert len(implied.target_qubits) == len(explicit.target_qubits) == 2
+    assert implied.hamiltonian == explicit.hamiltonian
+    assert implied.symmetry_generator_labels == ['g0', 'g1']
+
+    with pytest.raises(ValueError, match='inconsistent sector'):
+        PeriodicEncoding(fixed_spin_orbitals={0: 1, 1: 1}, **common)
+
+    with pytest.raises(ValueError, match='Boolean constraints'):
+        PeriodicEncoding(
+            fermion_hamiltonian=hamiltonian,
+            nspinorbital=2,
+            symmetry_generators=[parity, parity],
+            signs=[1, -1],
+        )
+
+
+@pytest.mark.parametrize(
+    ('fixed', 'error'),
+    [
+        ([], TypeError),
+        ({True: 1}, TypeError),
+        ({-1: 1}, ValueError),
+        ({2: 1}, ValueError),
+        ({0: 0.0}, TypeError),
+        ({0: 2}, ValueError),
+    ],
+)
+def test_fixed_spin_orbitals_validate_input(fixed, error):
+    with pytest.raises(error):
+        PeriodicEncoding(
+            fermion_hamiltonian=FermionOperator(),
+            nspinorbital=2,
+            nelectron_up=0,
+            nelectron_down=0,
+            fixed_spin_orbitals=fixed,
+        )
+
+
+def test_fixed_spin_orbitals_keep_qiskit_operator_lists_aligned():
+    """Projected-zero excitations retain their position as ``None``."""
+    enc = PeriodicEncoding(
+        fermion_hamiltonian=FermionOperator('1^ 1') + FermionOperator('2^ 2'),
+        nspinorbital=3,
+        nelectron_up=1,
+        nelectron_down=0,
+        fixed_spin_orbitals={0: 1},
+        output_format='qiskit',
+    )
+    operators = [
+        FermionOperator('1^ 1'),
+        FermionOperator('0^ 1') + FermionOperator('1^ 0'),
+        FermionOperator('2^ 2'),
+    ]
+    mapped = enc.qiskit_mapper.map(operators)
+    assert len(mapped) == 3
+    assert mapped[0] is not None
+    assert mapped[1] is None
+    assert mapped[2] is not None
+    assert mapped[0].num_qubits == mapped[2].num_qubits == 2
+    assert np.allclose(mapped[0].to_matrix(), enc.apply(operators[0]).to_matrix())
+    assert np.allclose(mapped[2].to_matrix(), enc.apply(operators[2]).to_matrix())
+
+
+def test_fixed_spin_orbitals_preserve_zero_qubit_qiskit_scalar():
+    enc = PeriodicEncoding(
+        fermion_hamiltonian=FermionOperator('0^ 0'),
+        nspinorbital=1,
+        fixed_spin_orbitals={0: 1},
+        output_format='qiskit',
+    )
+    hamiltonian = enc.hamiltonian
+    assert isinstance(hamiltonian, SparsePauliOp)
+    assert hamiltonian.num_qubits == 0
+    assert np.allclose(hamiltonian.coeffs, [1.0])
+    result = StatevectorEstimator().run([
+        (QuantumCircuit(0), hamiltonian)
+    ]).result()
+    assert isclose(result[0].data.evs, 1.0)
+
+
+def test_fixed_spin_orbitals_preserve_jw_bk_spectrum():
+    hamiltonian = (
+        sum(
+            coefficient * FermionOperator(f'{mode}^ {mode}')
+            for mode, coefficient in enumerate((0.2, 0.4, 0.7, 1.1))
+        )
+        + 0.13 * FermionOperator('0^ 2^ 2 0')
+        + 0.09 * FermionOperator('0^ 3^ 3 0')
+    )
+    common = dict(
+        fermion_hamiltonian=hamiltonian,
+        nspinorbital=4,
+        nelectron_up=1,
+        nelectron_down=1,
+        fixed_spin_orbitals={0: 1, 1: 0},
+    )
+    enc_jw = PeriodicEncoding(bravyi_kitaev=False, **common)
+    enc_bk = PeriodicEncoding(bravyi_kitaev=True, **common)
+    n_reduced = enc_jw.nspinorbital - len(enc_jw.target_qubits)
+    matrix_jw = get_sparse_operator(
+        enc_jw.hamiltonian, n_qubits=n_reduced
+    ).toarray()
+    matrix_bk = get_sparse_operator(
+        enc_bk.hamiltonian, n_qubits=n_reduced
+    ).toarray()
+    assert np.allclose(
+        np.sort(eigvalsh(matrix_jw)),
+        np.sort(eigvalsh(matrix_bk)),
+        atol=1e-12,
+    )
 
 
 def test_periodic_BK_spectrum_invariant():

@@ -942,20 +942,21 @@ def get_molecule_name(mol):
     return string
 
 def QubitOperator_to_PauliSumOp(qubitoperator, num_qubits = None):
-    """Converts a qubit operator stored as in an OpenFermion format (an openfermion.QubitOperator object) into the equivalent operator in Qiskit format (a qiskit.quantum_info.SparsePauliOp object)
+    """Converts a qubit operator stored as in an OpenFermion format (an openfermion.QubitOperator object) into the equivalent operator in Qiskit format.
 
     Args:
         qubitoperator (openfermion.QubitOperator): the openfermion.QubitOperator input 
 
     Returns:
-        quantum_info.SparsePauliOp: the qiskit.quantum_info.SparsePauliOp output
+        quantum_info.SparsePauliOp: The Qiskit operator.
     """
     if num_qubits == None:
         N = utils.count_qubits(qubitoperator)
     else:
         N = num_qubits
     if N == 0:
-        return 0
+        coefficient = qubitoperator.terms.get((), 0.0)
+        return quantum_info.SparsePauliOp('', coeffs=[coefficient])
     output = 0*quantum_info.SparsePauliOp('I'*N)
     for key in qubitoperator.terms:
         if not key:

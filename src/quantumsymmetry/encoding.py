@@ -18,6 +18,48 @@ except ImportError:
     FermionicOp = QubitMapper = JordanWignerMapper = InterleavedQubitMapper = None
 import time
 
+
+def _normalise_fixed_spin_orbitals(fixed_spin_orbitals, nspinorbital):
+    """Validate a sparse spin-orbital occupation specification."""
+    if fixed_spin_orbitals is None:
+        return {}
+    if not isinstance(fixed_spin_orbitals, dict):
+        raise TypeError("fixed_spin_orbitals must be a dictionary or None")
+
+    normalised = {}
+    for mode, occupation in fixed_spin_orbitals.items():
+        if isinstance(mode, (bool, np.bool_)) or not isinstance(
+            mode, (int, np.integer)
+        ):
+            raise TypeError("fixed spin-orbital indices must be integers")
+        mode = int(mode)
+        if mode < 0 or mode >= int(nspinorbital):
+            raise ValueError(
+                f"fixed spin-orbital index {mode} is outside "
+                f"[0, {int(nspinorbital) - 1}]"
+            )
+        if not isinstance(occupation, (bool, np.bool_, int, np.integer)):
+            raise TypeError("fixed spin-orbital occupations must be 0 or 1")
+        occupation = int(occupation)
+        if occupation not in (0, 1):
+            raise ValueError("fixed spin-orbital occupations must be 0 or 1")
+        normalised[mode] = occupation
+    return dict(sorted(normalised.items()))
+
+
+def _boolean_constraints_are_consistent(generators, signs):
+    """Return whether ``G x = signs`` has a solution over GF(2)."""
+    if not generators:
+        return True
+    generator_bits = (1 - np.asarray(generators, dtype=int)) // 2
+    sign_bits = ((1 - np.asarray(signs, dtype=int)) // 2).reshape(-1, 1)
+    _, generator_pivots = binary_reduced_row_echelon(generator_bits.copy())
+    _, augmented_pivots = binary_reduced_row_echelon(
+        np.hstack([generator_bits, sign_bits])
+    )
+    return len(generator_pivots) == len(augmented_pivots)
+
+
 class Encoding():
     def __init__(self, atom, basis, charge = 0, spin = 0, irrep = None, symmetry = True, verbose = False, show_lowest_eigenvalue = False, CAS = None, quick_CAS=False, natural_orbitals = False, active_mo = None, bravyi_kitaev = False, output_format = 'openfermion'):
         self.atom = atom
@@ -573,6 +615,14 @@ class PeriodicEncoding():
        :class:`openfermion.FermionOperator` together with +/-1 generator
        arrays.  Used by the model-Hamiltonian benchmarks (Hubbard,
        two-band).
+
+    ``fixed_spin_orbitals`` optionally maps zero-based spin-orbital indices
+    to occupations 0 or 1.  Indices refer to the FermionOperator after any
+    ``active_mos`` restriction and use interleaved spin order (``2*p`` alpha,
+    ``2*p + 1`` beta).  The occupations are projected after the periodic
+    Hamiltonian, including optional cRPA downfolding, has been constructed;
+    they do not change the selected particle-number or spatial-symmetry
+    sector.
     """
 
     def __init__(self,
@@ -591,7 +641,8 @@ class PeriodicEncoding():
                  # Common
                  name='crystal', bravyi_kitaev=False,
                  output_format='openfermion',
-                 downfolding=None):
+                 downfolding=None,
+                 fixed_spin_orbitals=None):
         self.name = name
         self.bravyi_kitaev = bool(bravyi_kitaev)
         self._bk_tableau_cache = {}
@@ -634,6 +685,7 @@ class PeriodicEncoding():
                 symmetry_generators=kw['symmetry_generators'],
                 signs=kw['signs'],
                 symmetry_generator_labels=kw['symmetry_generator_labels'],
+                fixed_spin_orbitals=fixed_spin_orbitals,
             )
         else:
             # ---- BYO-Hamiltonian path ----
@@ -649,10 +701,12 @@ class PeriodicEncoding():
                 symmetry_generators=symmetry_generators,
                 signs=signs,
                 symmetry_generator_labels=symmetry_generator_labels,
+                fixed_spin_orbitals=fixed_spin_orbitals,
             )
 
     def _setup(self, fermion_hamiltonian, nspinorbital, nelectron_up, nelectron_down,
-               symmetry_generators, signs, symmetry_generator_labels):
+               symmetry_generators, signs, symmetry_generator_labels,
+               fixed_spin_orbitals):
         if fermion_hamiltonian is None:
             raise ValueError("PeriodicEncoding requires a fermion_hamiltonian (openfermion.FermionOperator)")
         if nspinorbital is None:
@@ -671,8 +725,44 @@ class PeriodicEncoding():
             self.nelectron = None
             self.spin = 0
 
-        if symmetry_generators is None or len(symmetry_generators) == 0:
-            # No symmetry: identity tableau
+        self.fixed_spin_orbitals = _normalise_fixed_spin_orbitals(
+            fixed_spin_orbitals, self.nspinorbital
+        )
+
+        # Validate generators: each is an array of length nspinorbital with entries +/-1
+        gens = []
+        if symmetry_generators is not None:
+            for g in symmetry_generators:
+                arr = np.asarray(g, dtype=int)
+                if arr.shape != (self.nspinorbital,):
+                    raise ValueError(
+                        f"Each symmetry generator must have length {self.nspinorbital}; got {arr.shape}"
+                    )
+                if not set(np.unique(arr).tolist()).issubset({-1, 1}):
+                    raise ValueError("symmetry_generators entries must be +1 or -1 only")
+                gens.append(arr)
+
+        if signs is None:
+            signs_list = [1] * len(gens)
+        else:
+            signs_list = [int(s) for s in signs]
+            if not all(s in (-1, 1) for s in signs_list):
+                raise ValueError("signs entries must be +1 or -1 only")
+        if len(signs_list) != len(gens):
+            raise ValueError("signs must have the same length as symmetry_generators")
+
+        # A fixed occupation n_p is the Boolean constraint Z_p = (-1)^n_p.
+        # Adding it before row reduction lets the existing Clifford projection
+        # implement P H P and automatically discard constraints already implied
+        # by the selected physical sector.
+        for mode, occupation in self.fixed_spin_orbitals.items():
+            generator = np.ones(self.nspinorbital, dtype=int)
+            generator[mode] = -1
+            gens.append(generator)
+            signs_list.append(1 - 2 * occupation)
+
+        if not gens:
+            # No symmetry or fixed-occupation constraints: identity tableau.
             self.symmetry = False
             self.symmetry_generator_labels = []
             self.symmetry_generators_strings = []
@@ -686,26 +776,8 @@ class PeriodicEncoding():
             self.tableau_signs = [1] * (2*n)
             return
 
-        # Validate generators: each is an array of length nspinorbital with entries +/-1
-        gens = []
-        for g in symmetry_generators:
-            arr = np.asarray(g, dtype=int)
-            if arr.shape != (self.nspinorbital,):
-                raise ValueError(
-                    f"Each symmetry generator must have length {self.nspinorbital}; got {arr.shape}"
-                )
-            if not set(np.unique(arr).tolist()).issubset({-1, 1}):
-                raise ValueError("symmetry_generators entries must be +1 or -1 only")
-            gens.append(arr)
-
-        if signs is None:
-            signs_list = [1] * len(gens)
-        else:
-            signs_list = [int(s) for s in signs]
-            if not all(s in (-1, 1) for s in signs_list):
-                raise ValueError("signs entries must be +1 or -1 only")
-        if len(signs_list) != len(gens):
-            raise ValueError("signs must have the same length as symmetry_generators")
+        if not _boolean_constraints_are_consistent(gens, signs_list):
+            raise ValueError("Boolean constraints define an inconsistent sector")
 
         # Row-reduce over GF(2) to canonical pivots and target qubits
         sg, sgn, tq = reduced_row_echelon_generators(gens, signs_list)
@@ -715,7 +787,9 @@ class PeriodicEncoding():
         self.target_qubits = list(tq)
         self.symmetry_target_qubits = list(tq)
 
-        if symmetry_generator_labels is None:
+        # Row reduction may combine a physical generator with an occupation
+        # constraint, so retain user labels only when their meaning is stable.
+        if symmetry_generator_labels is None or self.fixed_spin_orbitals:
             self.symmetry_generator_labels = [f'g{i}' for i in range(len(sg))]
         else:
             labels = [str(x) for x in symmetry_generator_labels]
@@ -770,14 +844,16 @@ class PeriodicEncoding():
                 mapped = self.apply(item)
                 if type(mapped) == quantum_info.SparsePauliOp:
                     try:
-                        if mapped.size == 0:
-                            continue
-                        if mapped.coeffs.size == 0:
-                            continue
-                        if np.all(mapped.coeffs == 0):
-                            continue
+                        is_zero = (
+                            mapped.size == 0
+                            or mapped.coeffs.size == 0
+                            or np.all(mapped.coeffs == 0)
+                        )
                     except Exception:
-                        pass
+                        is_zero = False
+                    if is_zero:
+                        output.append(None)
+                        continue
                 output.append(mapped)
             return output
         if type(operator) == FermionOperator:

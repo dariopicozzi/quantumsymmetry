@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.5
+
+- Add optional fixed spin-orbital occupations to `PeriodicEncoding` through
+  `fixed_spin_orbitals={mode: occupation}`. The corresponding Boolean
+  projection is combined with the selected periodic sector before qubit
+  reduction, with incompatible constraints rejected explicitly.
+- Preserve Qiskit mapper alignment when projection removes an operator, and
+  represent fully reduced scalar operators as zero-qubit `SparsePauliOp`
+  objects.
+
 ## 0.3.4
 
 - Return bare periodic active-space Hamiltonians without adding an automatic
